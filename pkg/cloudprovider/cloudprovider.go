@@ -239,19 +239,17 @@ func (c *CloudProvider) instanceToNodeClaim(inst *instance.Instance, existingCla
 	// Set node name to the droplet name
 	nodeClaim.Status.NodeName = inst.Name
 
-	// Set addresses
-	var addresses []v1.NodeAddress
+	// Store IP addresses as annotations for reference
+	// (NodeClaimStatus does not have an Addresses field; actual node addresses
+	// are populated by the kubelet when the node registers.)
+	if nodeClaim.Annotations == nil {
+		nodeClaim.Annotations = make(map[string]string)
+	}
 	if inst.PrivateIPv4 != "" {
-		addresses = append(addresses, v1.NodeAddress{
-			Type:    v1.NodeInternalIP,
-			Address: inst.PrivateIPv4,
-		})
+		nodeClaim.Annotations[v1alpha1.AnnotationPrivateIPv4] = inst.PrivateIPv4
 	}
 	if inst.PublicIPv4 != "" {
-		addresses = append(addresses, v1.NodeAddress{
-			Type:    v1.NodeExternalIP,
-			Address: inst.PublicIPv4,
-		})
+		nodeClaim.Annotations[v1alpha1.AnnotationPublicIPv4] = inst.PublicIPv4
 	}
 
 	// Set capacity from the instance size

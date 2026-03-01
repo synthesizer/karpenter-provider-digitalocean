@@ -29,6 +29,12 @@ const (
 	// AnnotationDropletID is the annotation key for the DigitalOcean Droplet ID.
 	AnnotationDropletID = Group + "/droplet-id"
 
+	// AnnotationPrivateIPv4 is the annotation key for the Droplet's private IPv4 address.
+	AnnotationPrivateIPv4 = Group + "/private-ipv4"
+
+	// AnnotationPublicIPv4 is the annotation key for the Droplet's public IPv4 address.
+	AnnotationPublicIPv4 = Group + "/public-ipv4"
+
 	// TagManagedBy is the tag applied to all droplets managed by Karpenter.
 	TagManagedBy = "karpenter-managed"
 

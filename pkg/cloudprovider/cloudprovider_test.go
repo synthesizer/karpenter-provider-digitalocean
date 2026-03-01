@@ -203,9 +203,10 @@ func TestInstanceToNodeClaimAddresses(t *testing.T) {
 	cp := &CloudProvider{}
 
 	tests := []struct {
-		name      string
-		inst      *instance.Instance
-		wantCount int
+		name          string
+		inst          *instance.Instance
+		wantPrivateIP string
+		wantPublicIP  string
 	}{
 		{
 			name: "both private and public IPs",
@@ -216,7 +217,8 @@ func TestInstanceToNodeClaimAddresses(t *testing.T) {
 				PrivateIPv4: "10.0.0.2",
 				PublicIPv4:  "1.2.3.4",
 			},
-			wantCount: 2,
+			wantPrivateIP: "10.0.0.2",
+			wantPublicIP:  "1.2.3.4",
 		},
 		{
 			name: "private IP only",
@@ -226,7 +228,7 @@ func TestInstanceToNodeClaimAddresses(t *testing.T) {
 				Size:        "s-1vcpu-1gb",
 				PrivateIPv4: "10.0.0.2",
 			},
-			wantCount: 1,
+			wantPrivateIP: "10.0.0.2",
 		},
 		{
 			name: "no IPs",
@@ -235,18 +237,22 @@ func TestInstanceToNodeClaimAddresses(t *testing.T) {
 				Region: "nyc1",
 				Size:   "s-1vcpu-1gb",
 			},
-			wantCount: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nc := cp.instanceToNodeClaim(tt.inst, nil)
-			_ = nc // addresses are set but we can verify labels are correct
-			// The addresses local var is not persisted in the current implementation
-			// but we verify the provider ID and labels are correctly set
 			if nc.Status.ProviderID == "" {
 				t.Error("expected non-empty provider ID")
+			}
+			gotPrivate := nc.Annotations[v1alpha1.AnnotationPrivateIPv4]
+			if gotPrivate != tt.wantPrivateIP {
+				t.Errorf("private IP annotation = %q, want %q", gotPrivate, tt.wantPrivateIP)
+			}
+			gotPublic := nc.Annotations[v1alpha1.AnnotationPublicIPv4]
+			if gotPublic != tt.wantPublicIP {
+				t.Errorf("public IP annotation = %q, want %q", gotPublic, tt.wantPublicIP)
 			}
 		})
 	}
