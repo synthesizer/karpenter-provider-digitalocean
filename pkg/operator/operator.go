@@ -30,8 +30,8 @@ import (
 
 	v1alpha1 "github.com/digitalocean/karpenter-provider-digitalocean/pkg/apis/v1alpha1"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/cloudprovider"
-	nodeclasscontroller "github.com/digitalocean/karpenter-provider-digitalocean/pkg/controllers/nodeclass"
 	nodeclaimcontroller "github.com/digitalocean/karpenter-provider-digitalocean/pkg/controllers/nodeclaim"
+	nodeclasscontroller "github.com/digitalocean/karpenter-provider-digitalocean/pkg/controllers/nodeclass"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/image"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/instance"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/instancetype"

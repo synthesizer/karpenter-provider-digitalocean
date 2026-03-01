@@ -721,11 +721,11 @@ func TestCloudProviderIsDrifted(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name       string
-		nodeClass  *v1alpha1.DONodeClass
-		instance   *instance.Instance
-		wantDrift  cloudprovider.DriftReason
-		wantErr    bool
+		name      string
+		nodeClass *v1alpha1.DONodeClass
+		instance  *instance.Instance
+		wantDrift cloudprovider.DriftReason
+		wantErr   bool
 	}{
 		{
 			name: "no drift",

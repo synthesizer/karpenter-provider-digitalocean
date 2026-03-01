@@ -23,10 +23,10 @@ import (
 func TestInstanceTypePrice(t *testing.T) {
 	provider := &DefaultProvider{
 		prices: map[priceKey]float64{
-			{size: "s-1vcpu-1gb", region: "nyc1"}:  0.00893,
-			{size: "s-2vcpu-4gb", region: "nyc1"}:  0.03571,
-			{size: "s-2vcpu-4gb", region: "sfo3"}:  0.03571,
-			{size: "g-2vcpu-8gb", region: "nyc1"}:  0.09375,
+			{size: "s-1vcpu-1gb", region: "nyc1"}: 0.00893,
+			{size: "s-2vcpu-4gb", region: "nyc1"}: 0.03571,
+			{size: "s-2vcpu-4gb", region: "sfo3"}: 0.03571,
+			{size: "g-2vcpu-8gb", region: "nyc1"}: 0.09375,
 		},
 	}
 

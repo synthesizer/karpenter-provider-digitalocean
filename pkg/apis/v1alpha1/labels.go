@@ -59,10 +59,10 @@ const (
 
 // Instance type families available on DigitalOcean.
 const (
-	InstanceFamilyBasic          = "s"   // Shared CPU, burstable
-	InstanceFamilyGeneralPurpose = "g"   // Dedicated CPU, balanced
-	InstanceFamilyCPUOptimized   = "c"   // Dedicated CPU, compute-heavy
-	InstanceFamilyMemoryOptimized = "m"  // Dedicated CPU, memory-heavy
-	InstanceFamilyStorageOptimized = "so" // Dedicated CPU, NVMe storage
-	InstanceFamilyGPU            = "gpu" // GPU-enabled
+	InstanceFamilyBasic            = "s"   // Shared CPU, burstable
+	InstanceFamilyGeneralPurpose   = "g"   // Dedicated CPU, balanced
+	InstanceFamilyCPUOptimized     = "c"   // Dedicated CPU, compute-heavy
+	InstanceFamilyMemoryOptimized  = "m"   // Dedicated CPU, memory-heavy
+	InstanceFamilyStorageOptimized = "so"  // Dedicated CPU, NVMe storage
+	InstanceFamilyGPU              = "gpu" // GPU-enabled
 )

@@ -29,8 +29,8 @@ import (
 	v1alpha1 "github.com/digitalocean/karpenter-provider-digitalocean/pkg/apis/v1alpha1"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/pricing"
 
-	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 )
 
@@ -41,7 +41,7 @@ type Provider interface {
 
 // DefaultProvider implements the instance type Provider with caching.
 type DefaultProvider struct {
-	doClient       *godo.Client
+	doClient        *godo.Client
 	pricingProvider pricing.Provider
 
 	mu    sync.RWMutex
@@ -51,7 +51,7 @@ type DefaultProvider struct {
 // NewDefaultProvider creates a new instance type provider.
 func NewDefaultProvider(doClient *godo.Client, pricingProvider pricing.Provider) *DefaultProvider {
 	return &DefaultProvider{
-		doClient:       doClient,
+		doClient:        doClient,
 		pricingProvider: pricingProvider,
 	}
 }
