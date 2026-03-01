@@ -1,0 +1,201 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: donodeclasses.karpenter.do.sh
+  labels:
+    {{- include "karpenter-do.labels" . | nindent 4 }}
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.0
+spec:
+  group: karpenter.do.sh
+  names:
+    kind: DONodeClass
+    listKind: DONodeClassList
+    plural: donodeclasses
+    singular: donodeclass
+    shortNames:
+      - donc
+    categories:
+      - karpenter
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Region
+          type: string
+          jsonPath: ".spec.region"
+        - name: Ready
+          type: string
+          jsonPath: ".status.conditions[?(@.type=='Ready')].status"
+        - name: Age
+          type: date
+          jsonPath: ".metadata.creationTimestamp"
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          description: >-
+            DONodeClass is the DigitalOcean-specific configuration for
+            Karpenter node provisioning. It is referenced by a NodePool's
+            spec.template.spec.nodeClassRef.
+          type: object
+          properties:
+            apiVersion:
+              description: >-
+                APIVersion defines the versioned schema of this representation of
+                an object.
+              type: string
+            kind:
+              description: >-
+                Kind is a string value representing the REST resource this object
+                represents.
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: DONodeClassSpec defines the desired state of DONodeClass.
+              type: object
+              required:
+                - region
+                - image
+              properties:
+                region:
+                  description: >-
+                    Region is the DigitalOcean region where droplets will be
+                    created. Examples: "nyc1", "sfo3", "ams3", "sgp1"
+                  type: string
+                  minLength: 3
+                vpcUUID:
+                  description: >-
+                    VPCUUID is the UUID of the VPC where droplets will be placed.
+                    If empty, the default VPC for the region will be used.
+                  type: string
+                image:
+                  description: >-
+                    Image specifies the OS image configuration for provisioned
+                    droplets.
+                  type: object
+                  properties:
+                    slug:
+                      description: >-
+                        Slug is a well-known DigitalOcean image slug
+                        (e.g., "ubuntu-24-04-x64"). Mutually exclusive with ID.
+                      type: string
+                    id:
+                      description: >-
+                        ID is a custom image or snapshot ID. Mutually exclusive
+                        with Slug.
+                      type: integer
+                sshKeys:
+                  description: >-
+                    SSHKeys is a list of SSH key fingerprints or IDs to add to
+                    provisioned droplets.
+                  type: array
+                  items:
+                    type: string
+                tags:
+                  description: >-
+                    Tags are additional tags applied to all droplets managed by
+                    this DONodeClass. Karpenter-managed tags are automatically
+                    added and should not be specified here.
+                  type: array
+                  items:
+                    type: string
+                userData:
+                  description: >-
+                    UserData is a cloud-init script or bash script to execute on
+                    droplet creation. This is used to bootstrap the node and join
+                    it to the Kubernetes cluster.
+                  type: string
+                blockStorage:
+                  description: >-
+                    BlockStorage configures block storage volumes to attach to
+                    provisioned droplets.
+                  type: object
+                  required:
+                    - sizeGiB
+                  properties:
+                    sizeGiB:
+                      description: >-
+                        SizeGiB is the size of the block storage volume in GiB.
+                      type: integer
+                      minimum: 1
+                      maximum: 16384
+                    fsType:
+                      description: >-
+                        FSType is the filesystem type for the volume
+                        (e.g., "ext4", "xfs").
+                      type: string
+                      default: "ext4"
+            status:
+              description: >-
+                DONodeClassStatus defines the observed state of DONodeClass.
+              type: object
+              properties:
+                imageID:
+                  description: >-
+                    ImageID is the resolved DigitalOcean image ID. This is
+                    populated after the image slug is resolved to a concrete ID.
+                  type: integer
+                specHash:
+                  description: >-
+                    SpecHash is the hash of the DONodeClassSpec, used for drift
+                    detection.
+                  type: string
+                conditions:
+                  description: Conditions contains the conditions for the DONodeClass.
+                  type: array
+                  items:
+                    description: >-
+                      Condition contains details for one aspect of the current
+                      state of this API Resource.
+                    type: object
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    properties:
+                      lastTransitionTime:
+                        description: >-
+                          lastTransitionTime is the last time the condition
+                          transitioned from one status to another.
+                        type: string
+                        format: date-time
+                      message:
+                        description: >-
+                          message is a human-readable message indicating details
+                          about the transition.
+                        type: string
+                        maxLength: 32768
+                      observedGeneration:
+                        description: >-
+                          observedGeneration represents the .metadata.generation
+                          that the condition was set based upon.
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      reason:
+                        description: >-
+                          reason contains a programmatic identifier indicating
+                          the reason for the condition's last transition.
+                        type: string
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: "^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$"
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      type:
+                        description: type of condition in CamelCase.
+                        type: string
+                        maxLength: 316
+                        pattern: "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$"

@@ -1,0 +1,110 @@
+name: Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: "Test suite to run"
+        required: false
+        default: "integration"
+        type: choice
+        options:
+          - integration
+          - e2e
+          - all
+  schedule:
+    # Run integration tests nightly at 2am UTC
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.23"
+
+jobs:
+  integration:
+    name: Integration Tests
+    if: github.event.inputs.test_suite != 'e2e'
+    runs-on: ubuntu-latest
+    environment: integration
+    env:
+      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      DO_CLUSTER_ID: ${{ secrets.DO_CLUSTER_ID }}
+      DO_REGION: ${{ secrets.DO_REGION }}
+      DO_VPC_UUID: ${{ secrets.DO_VPC_UUID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Validate secrets
+        run: |
+          if [ -z "$DIGITALOCEAN_ACCESS_TOKEN" ]; then
+            echo "::error::DIGITALOCEAN_ACCESS_TOKEN secret is not set. Configure it in the 'integration' environment."
+            exit 1
+          fi
+
+      - name: Run integration tests
+        run: |
+          go test ./test/suites/integration/... -v -count=1 -timeout 30m
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: |
+            **/test-results.xml
+            **/test-output.log
+
+  e2e:
+    name: E2E Tests
+    if: github.event.inputs.test_suite == 'e2e' || github.event.inputs.test_suite == 'all' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    environment: integration
+    env:
+      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      DO_CLUSTER_ID: ${{ secrets.DO_CLUSTER_ID }}
+      DO_REGION: ${{ secrets.DO_REGION }}
+      DO_VPC_UUID: ${{ secrets.DO_VPC_UUID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Configure kubectl
+        run: |
+          doctl kubernetes cluster kubeconfig save ${{ secrets.DO_CLUSTER_ID }}
+
+      - name: Run e2e tests
+        run: |
+          go test ./test/suites/e2e/... -v -count=1 -timeout 60m
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: |
+            **/test-results.xml
+            **/test-output.log

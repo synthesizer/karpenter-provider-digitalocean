@@ -1,0 +1,17 @@
+apiVersion: v2
+name: karpenter-do
+description: Karpenter DigitalOcean provider — Kubernetes node autoscaler for DigitalOcean Droplets
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - karpenter
+  - kubernetes
+  - autoscaler
+  - digitalocean
+  - droplet
+home: https://github.com/digitalocean/karpenter-provider-digitalocean
+sources:
+  - https://github.com/digitalocean/karpenter-provider-digitalocean
+maintainers:
+  - name: DigitalOcean

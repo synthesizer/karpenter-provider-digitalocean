@@ -1,0 +1,47 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "karpenter-do.fullname" . }}
+  labels:
+    {{- include "karpenter-do.labels" . | nindent 4 }}
+rules:
+  # Karpenter core resources
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools", "nodepools/status", "nodeclaims", "nodeclaims/status"]
+    verbs: ["get", "list", "watch", "patch", "update", "create", "delete"]
+  # DigitalOcean NodeClass
+  - apiGroups: ["karpenter.do.sh"]
+    resources: ["donodeclasses", "donodeclasses/status"]
+    verbs: ["get", "list", "watch", "patch", "update", "create", "delete"]
+  # Node management
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["get", "list", "watch", "patch", "update", "create", "delete"]
+  # Pod scheduling info
+  - apiGroups: [""]
+    resources: ["pods", "pods/binding"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  # Events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Persistent Volumes
+  - apiGroups: [""]
+    resources: ["persistentvolumes", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  # Storage classes
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes"]
+    verbs: ["get", "list", "watch"]
+  # Coordination for leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # ReplicaSets (for topology spread)
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # Policy
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]

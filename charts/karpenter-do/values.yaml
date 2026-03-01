@@ -1,0 +1,88 @@
+# Default values for karpenter-do.
+
+replicaCount: 2
+
+image:
+  repository: digitalocean/karpenter-provider-do
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to chart appVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Controller settings
+settings:
+  # Name of the Kubernetes cluster
+  clusterName: ""
+  # Kubernetes API server endpoint (e.g., https://xxx.k8s.ondigitalocean.com)
+  clusterEndpoint: ""
+
+# DigitalOcean configuration
+digitalocean:
+  # DigitalOcean API access token (provide via secret or direct value)
+  accessToken: ""
+  # Reference an existing secret instead of creating one
+  existingSecret: ""
+  # Key in the existing secret that contains the access token
+  secretKey: "access-token"
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "karpenter"
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 65532
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+
+tolerations:
+  # Allow scheduling on control plane nodes
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: karpenter.sh/nodepool
+              operator: DoesNotExist
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+
+# Webhook configuration (for validating/mutating DONodeClass)
+webhook:
+  enabled: false
+  port: 9443
+
+# Metrics configuration
+metrics:
+  enabled: true
+  port: 8080
+
+# Health check configuration
+health:
+  port: 8081
