@@ -246,10 +246,8 @@ jobs:
           echo "Installing NodePool and NodeClaim CRDs..."
           kubectl apply --server-side -f config/crd/
 
-      - name: Install DONodeClass CRD
-        run: |
-          helm template karpenter-do charts/karpenter-do \
-            --show-only templates/crd-donodeclass.yaml | kubectl apply --server-side -f -
+      # DONodeClass CRD is installed by the Helm chart template.
+      # Installing it separately causes Helm ownership conflicts.
 
       # ── Resolve cluster info ─────────────────────────────────────────
       - name: Resolve cluster info
