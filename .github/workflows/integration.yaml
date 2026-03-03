@@ -1,6 +1,8 @@
 name: Integration Tests
 
 on:
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       test_suite:
@@ -47,6 +49,11 @@ jobs:
   # -------------------------------------------------------------------
   create-cluster:
     name: Create DOKS Cluster
+    # Only run for schedule/dispatch, or when the PR label is "integration_test"
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'integration_test')
     runs-on: ubuntu-latest
     environment: integration
     outputs:
@@ -213,11 +220,14 @@ jobs:
         run: |
           kubectl apply -f charts/karpenter-do/templates/crd-donodeclass.yaml
 
-      - name: Resolve VPC UUID
-        id: vpc
+      - name: Resolve VPC UUID and endpoint
+        id: cluster_info
         run: |
-          VPC_UUID=$(doctl kubernetes cluster get "${{ needs.create-cluster.outputs.cluster_id }}" -o json | jq -r '.[0].vpc_uuid')
+          CLUSTER_JSON=$(doctl kubernetes cluster get "${{ needs.create-cluster.outputs.cluster_id }}" -o json)
+          VPC_UUID=$(echo "$CLUSTER_JSON" | jq -r '.[0].vpc_uuid')
+          ENDPOINT=$(echo "$CLUSTER_JSON" | jq -r '.[0].endpoint')
           echo "vpc_uuid=$VPC_UUID" >> "$GITHUB_OUTPUT"
+          echo "endpoint=$ENDPOINT" >> "$GITHUB_OUTPUT"
 
       - name: Run e2e tests
         run: |
@@ -226,9 +236,9 @@ jobs:
           DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           DO_CLUSTER_ID: ${{ needs.create-cluster.outputs.cluster_id }}
           DO_REGION: ${{ env.DO_REGION }}
-          DO_VPC_UUID: ${{ steps.vpc.outputs.vpc_uuid }}
+          DO_VPC_UUID: ${{ steps.cluster_info.outputs.vpc_uuid }}
           CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster_name }}
-          CLUSTER_ENDPOINT: ${{ steps.endpoint.outputs.endpoint }}
+          CLUSTER_ENDPOINT: ${{ steps.cluster_info.outputs.endpoint }}
 
       - name: Collect cluster diagnostics
         if: failure()
