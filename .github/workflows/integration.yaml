@@ -210,36 +210,31 @@ jobs:
       # ── Build and push controller image to DOCR ──────────────────────
       - name: Prepare DOCR registry
         run: |
-          # Create registry if it doesn't exist (idempotent).
-          # Don't delete the registry — that breaks DOKS cluster auth.
-          doctl registry create karpenter-ci --subscription-tier starter 2>/dev/null || true
+          # Disconnect the cluster from any existing registry first.
+          doctl kubernetes cluster registry remove "${{ needs.create-cluster.outputs.cluster_name }}" 2>/dev/null || true
 
-          # Delete ALL repositories to free the 1-repo slot on starter tier.
-          # Deleting tags alone isn't enough — the repo entry persists and
-          # counts against the limit.
-          for repo in $(doctl registry repository list-v2 -o json 2>/dev/null | jq -r '.[].repository_name // empty' 2>/dev/null); do
-            echo "Deleting repository: $repo"
-            doctl registry repository delete "$repo" --force 2>/dev/null || true
+          # Delete and recreate the registry to guarantee a clean slate.
+          # The starter tier only allows 1 repository, and leftover repo
+          # metadata blocks new pushes even after tag deletion + GC.
+          echo "Deleting old registry..."
+          for i in 1 2 3; do
+            doctl registry delete --force 2>/dev/null && echo "Registry deleted (attempt $i)" && break || true
+            echo "  delete attempt $i failed (GC may be active), waiting 15s..."
+            sleep 15
           done
+          sleep 5
 
-          # Run GC and wait for it to finish so the repo slot is freed.
-          doctl registry garbage-collection start --force 2>/dev/null || true
-          echo "Waiting for garbage collection to complete..."
-          for i in $(seq 1 24); do
-            STATUS=$(doctl registry garbage-collection get-active -o json 2>/dev/null | jq -r '.[0].status // "not_found"' 2>/dev/null || echo "not_found")
-            if [ "$STATUS" = "not_found" ] || [ "$STATUS" = "succeeded" ] || [ "$STATUS" = "failed" ]; then
-              echo "GC finished (status: $STATUS) after ~$((i*5))s"
-              break
-            fi
-            echo "  GC status: $STATUS (attempt $i/24)"
-            sleep 5
-          done
+          echo "Creating fresh registry..."
+          doctl registry create karpenter-ci --subscription-tier starter
           echo "DOCR registry ready"
 
       - name: Connect DOCR to DOKS cluster
         run: |
-          # Ensure DOKS cluster has pull credentials for the registry.
+          # Add fresh registry credentials to the DOKS cluster.
           doctl kubernetes cluster registry add "${{ needs.create-cluster.outputs.cluster_name }}"
+          # Give credentials time to propagate to kubelet on nodes.
+          sleep 15
+          echo "DOCR connected to cluster"
 
       - name: Login to DOCR
         run: doctl registry login
@@ -249,19 +244,9 @@ jobs:
         run: |
           IMAGE="registry.digitalocean.com/karpenter-ci/karpenter-do:ci-${{ github.run_id }}"
           docker build -t "$IMAGE" .
-          # Retry push — GC slot reclaim can be slow on starter tier.
-          for attempt in 1 2 3 4 5; do
-            if docker push "$IMAGE" 2>&1; then
-              echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-              echo "Pushed $IMAGE (attempt $attempt)"
-              exit 0
-            fi
-            echo "Push attempt $attempt failed, waiting 30s..."
-            doctl registry garbage-collection start --force 2>/dev/null || true
-            sleep 30
-          done
-          echo "::error::Failed to push image after 5 attempts"
-          exit 1
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Pushed $IMAGE"
 
       # ── Install CRDs ─────────────────────────────────────────────────
       - name: Install Karpenter core CRDs
