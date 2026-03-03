@@ -21,30 +21,85 @@ limitations under the License.
 //
 //   - DIGITALOCEAN_ACCESS_TOKEN: a valid DigitalOcean API token
 //   - DO_CLUSTER_ID: the DOKS cluster ID
-//   - DO_REGION: the region the cluster is in
+//   - DO_REGION: the region the cluster is in (default: nyc1)
 //   - DO_VPC_UUID: the VPC UUID of the cluster
 //   - CLUSTER_NAME: the cluster name
+//   - CLUSTER_ENDPOINT: the cluster API endpoint
 package e2e
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
+)
+
+// Global test state shared across all e2e tests.
+var (
+	kubeClient    kubernetes.Interface
+	dynamicClient dynamic.Interface
+	restConfig    *rest.Config
+
+	testRegion          string
+	testVPCUUID         string
+	testClusterName     string
+	testClusterID       string
+	testClusterEndpoint string
 )
 
 func TestMain(m *testing.M) {
-	// Skip the entire suite when no token is available.
 	if os.Getenv("DIGITALOCEAN_ACCESS_TOKEN") == "" {
+		fmt.Println("DIGITALOCEAN_ACCESS_TOKEN not set, skipping e2e tests")
 		os.Exit(0)
 	}
 	if os.Getenv("DO_CLUSTER_ID") == "" {
+		fmt.Println("DO_CLUSTER_ID not set, skipping e2e tests")
 		os.Exit(0)
 	}
 
-	os.Exit(m.Run())
-}
+	var err error
 
-// TestPlaceholder ensures the e2e package compiles and the test runner finds
-// at least one test. Replace this with real e2e tests as they are implemented.
-func TestPlaceholder(t *testing.T) {
-	t.Log("E2E test suite placeholder — real tests coming soon")
+	// Load kubeconfig — try KUBECONFIG env, then default path.
+	kubeconfig := os.Getenv("KUBECONFIG")
+	if kubeconfig == "" {
+		if home := homedir.HomeDir(); home != "" {
+			kubeconfig = filepath.Join(home, ".kube", "config")
+		}
+	}
+
+	restConfig, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		fmt.Printf("Failed to load kubeconfig from %s: %v\n", kubeconfig, err)
+		os.Exit(1)
+	}
+
+	kubeClient, err = kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		fmt.Printf("Failed to create Kubernetes clientset: %v\n", err)
+		os.Exit(1)
+	}
+
+	dynamicClient, err = dynamic.NewForConfig(restConfig)
+	if err != nil {
+		fmt.Printf("Failed to create dynamic client: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Populate environment.
+	testRegion = os.Getenv("DO_REGION")
+	if testRegion == "" {
+		testRegion = "nyc1"
+	}
+	testVPCUUID = os.Getenv("DO_VPC_UUID")
+	testClusterName = os.Getenv("CLUSTER_NAME")
+	testClusterID = os.Getenv("DO_CLUSTER_ID")
+	testClusterEndpoint = os.Getenv("CLUSTER_ENDPOINT")
+
+	os.Exit(m.Run())
 }

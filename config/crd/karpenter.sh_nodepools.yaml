@@ -1,0 +1,53 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodepools.karpenter.sh
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.0
+spec:
+  group: karpenter.sh
+  names:
+    kind: NodePool
+    listKind: NodePoolList
+    plural: nodepools
+    singular: nodepool
+    categories:
+      - karpenter
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: NodeClass
+          type: string
+          jsonPath: ".spec.template.spec.nodeClassRef.name"
+        - name: Nodes
+          type: string
+          jsonPath: ".status.resources.nodes"
+        - name: Ready
+          type: string
+          jsonPath: ".status.conditions[?(@.type=='Ready')].status"
+        - name: Age
+          type: date
+          jsonPath: ".metadata.creationTimestamp"
+      schema:
+        openAPIV3Schema:
+          description: NodePool is the Schema for the NodePools API
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

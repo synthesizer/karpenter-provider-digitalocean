@@ -35,6 +35,7 @@ on:
 
 permissions:
   contents: read
+  packages: write   # needed for GHCR push (fallback)
 
 env:
   GO_VERSION: "1.24"
@@ -210,18 +211,47 @@ jobs:
         run: |
           doctl kubernetes cluster kubeconfig save "${{ needs.create-cluster.outputs.cluster_name }}"
 
-      - name: Build and load controller image
-        run: |
-          IMG=digitalocean/karpenter-provider-do:ci make docker-build
-          # If the cluster is remote, push to a registry instead;
-          # for now the e2e tests use the built binary directly.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.0
 
-      - name: Install CRDs
+      # ── Build and push controller image to DOCR ──────────────────────
+      - name: Create DOCR registry
+        run: |
+          # Create registry if it doesn't already exist (starter tier = 500 MB free).
+          doctl registry create karpenter-ci --subscription-tier starter 2>/dev/null || true
+          echo "DOCR registry ready"
+
+      - name: Login to DOCR
+        run: doctl registry login
+
+      - name: Build and push controller image
+        id: build
+        run: |
+          IMAGE="registry.digitalocean.com/karpenter-ci/karpenter-do:ci-${{ github.run_id }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Pushed $IMAGE"
+
+      - name: Connect DOCR to DOKS cluster
+        run: |
+          doctl kubernetes cluster registry add "${{ needs.create-cluster.outputs.cluster_name }}" || true
+
+      # ── Install CRDs ─────────────────────────────────────────────────
+      - name: Install Karpenter core CRDs
+        run: |
+          echo "Installing NodePool and NodeClaim CRDs..."
+          kubectl apply --server-side -f config/crd/
+
+      - name: Install DONodeClass CRD
         run: |
           helm template karpenter-do charts/karpenter-do \
-            --show-only templates/crd-donodeclass.yaml | kubectl apply -f -
+            --show-only templates/crd-donodeclass.yaml | kubectl apply --server-side -f -
 
-      - name: Resolve VPC UUID and endpoint
+      # ── Resolve cluster info ─────────────────────────────────────────
+      - name: Resolve cluster info
         id: cluster_info
         run: |
           CLUSTER_JSON=$(doctl kubernetes cluster get "${{ needs.create-cluster.outputs.cluster_id }}" -o json)
@@ -229,7 +259,33 @@ jobs:
           ENDPOINT=$(echo "$CLUSTER_JSON" | jq -r '.[0].endpoint')
           echo "vpc_uuid=$VPC_UUID" >> "$GITHUB_OUTPUT"
           echo "endpoint=$ENDPOINT" >> "$GITHUB_OUTPUT"
+          echo "VPC: $VPC_UUID   Endpoint: $ENDPOINT"
 
+      # ── Deploy Karpenter controller via Helm ─────────────────────────
+      - name: Deploy Karpenter controller
+        run: |
+          # Create namespace if needed
+          kubectl create namespace kube-system 2>/dev/null || true
+
+          helm upgrade --install karpenter-do charts/karpenter-do \
+            --namespace kube-system \
+            --set image.repository=registry.digitalocean.com/karpenter-ci/karpenter-do \
+            --set image.tag=ci-${{ github.run_id }} \
+            --set image.pullPolicy=Always \
+            --set replicaCount=1 \
+            --set settings.clusterName=${{ needs.create-cluster.outputs.cluster_name }} \
+            --set settings.clusterEndpoint=${{ steps.cluster_info.outputs.endpoint }} \
+            --set digitalocean.accessToken=${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }} \
+            --wait --timeout 5m
+
+      - name: Wait for controller to be ready
+        run: |
+          echo "Waiting for Karpenter controller rollout..."
+          kubectl -n kube-system rollout status deployment/karpenter-do --timeout=300s
+          echo "Controller pods:"
+          kubectl -n kube-system get pods -l app.kubernetes.io/name=karpenter-do -o wide
+
+      # ── Run E2E tests ────────────────────────────────────────────────
       - name: Run e2e tests
         run: |
           go test ./test/suites/e2e/... -v -count=1 -timeout 60m
@@ -241,19 +297,30 @@ jobs:
           CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster_name }}
           CLUSTER_ENDPOINT: ${{ steps.cluster_info.outputs.endpoint }}
 
+      # ── Diagnostics on failure ───────────────────────────────────────
       - name: Collect cluster diagnostics
         if: failure()
         run: |
           echo "=== Nodes ==="
           kubectl get nodes -o wide || true
+          echo ""
           echo "=== NodeClaims ==="
-          kubectl get nodeclaims -o wide || true
+          kubectl get nodeclaims -o wide 2>/dev/null || echo "(none)"
+          echo ""
           echo "=== DONodeClasses ==="
-          kubectl get donodeclasses -o wide || true
+          kubectl get donodeclasses -o wide 2>/dev/null || echo "(none)"
+          echo ""
           echo "=== NodePools ==="
-          kubectl get nodepools -o wide || true
-          echo "=== Karpenter controller logs ==="
-          kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter-do --tail=200 || true
+          kubectl get nodepools -o wide 2>/dev/null || echo "(none)"
+          echo ""
+          echo "=== Karpenter controller logs (last 300 lines) ==="
+          kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter-do --tail=300 || true
+          echo ""
+          echo "=== Karpenter controller describe ==="
+          kubectl describe deployment -n kube-system karpenter-do || true
+          echo ""
+          echo "=== Events ==="
+          kubectl get events --sort-by='.lastTimestamp' -A | tail -50 || true
 
       - name: Upload test results
         if: always()
@@ -265,7 +332,7 @@ jobs:
             **/test-output.log
 
   # -------------------------------------------------------------------
-  # Always delete the cluster, even if tests fail
+  # Always delete the cluster and clean up resources
   # -------------------------------------------------------------------
   delete-cluster:
     name: Delete DOKS Cluster
@@ -287,6 +354,14 @@ jobs:
             --dangerous
           echo "Cluster deleted."
 
+      - name: Clean up DOCR images
+        run: |
+          echo "Cleaning up CI image from DOCR..."
+          doctl registry repository delete-tag karpenter-do ci-${{ github.run_id }} --force 2>/dev/null || true
+          # Run garbage collection to reclaim storage
+          doctl registry garbage-collection start --force 2>/dev/null || true
+          echo "DOCR cleanup done."
+
       - name: Clean up associated resources
         run: |
           echo "Cleaning up volumes and load balancers tagged with the cluster..."
@@ -301,5 +376,9 @@ jobs:
             grep "${{ needs.create-cluster.outputs.cluster_name }}" | \
             awk '{print $1}' | \
             xargs -r -I {} doctl compute load-balancer delete {} --force || true
+
+          # Delete any Karpenter-managed droplets that might be orphaned
+          doctl compute droplet list --tag-name karpenter-managed --format ID --no-header | \
+            xargs -r -I {} doctl compute droplet delete {} --force || true
 
           echo "Cleanup complete."
