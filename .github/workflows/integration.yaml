@@ -214,6 +214,23 @@ jobs:
           doctl registry create karpenter-ci --subscription-tier starter 2>/dev/null || true
           echo "DOCR registry ready"
 
+      - name: Clean up stale DOCR images
+        run: |
+          # Starter tier allows only 1 repository. Remove old tags and run GC
+          # so a prior run's leftovers don't block our push.
+          for repo in $(doctl registry repository list-v2 --format Name --no-header 2>/dev/null || true); do
+            echo "Cleaning repository: $repo"
+            for tag in $(doctl registry repository list-tags "$repo" --format Tag --no-header 2>/dev/null || true); do
+              echo "  Deleting tag: $tag"
+              doctl registry repository delete-tag "$repo" "$tag" --force 2>/dev/null || true
+            done
+          done
+          # Start garbage collection to reclaim space and free repo slots.
+          doctl registry garbage-collection start --force 2>/dev/null || true
+          # Give GC a moment to process.
+          sleep 10
+          echo "DOCR cleanup done"
+
       - name: Login to DOCR
         run: doctl registry login
 
@@ -222,9 +239,19 @@ jobs:
         run: |
           IMAGE="registry.digitalocean.com/karpenter-ci/karpenter-do:ci-${{ github.run_id }}"
           docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "Pushed $IMAGE"
+          # Retry push up to 3 times — DOCR starter tier can be slow to reclaim repo slots.
+          for attempt in 1 2 3; do
+            if docker push "$IMAGE" 2>&1; then
+              echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+              echo "Pushed $IMAGE (attempt $attempt)"
+              exit 0
+            fi
+            echo "Push attempt $attempt failed, waiting for DOCR GC to finish..."
+            doctl registry garbage-collection start --force 2>/dev/null || true
+            sleep 30
+          done
+          echo "::error::Failed to push image after 3 attempts"
+          exit 1
 
       - name: Connect DOCR to DOKS cluster
         run: |
