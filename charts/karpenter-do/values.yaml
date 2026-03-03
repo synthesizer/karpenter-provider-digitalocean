@@ -5,7 +5,7 @@ replicaCount: 2
 image:
   repository: digitalocean/karpenter-provider-do
   pullPolicy: IfNotPresent
-  tag: ""  # Defaults to chart appVersion
+  tag: "" # Defaults to chart appVersion
 
 imagePullSecrets: []
 nameOverride: ""
@@ -19,6 +19,8 @@ settings:
   clusterEndpoint: ""
   # DOKS cluster ID (UUID from DigitalOcean)
   clusterID: ""
+  # DigitalOcean region the DOKS cluster runs in (e.g., "nyc1", "sfo3")
+  clusterRegion: ""
 
 # DigitalOcean configuration
 digitalocean:
@@ -45,7 +47,7 @@ securityContext:
   allowPrivilegeEscalation: false
   capabilities:
     drop:
-      - ALL
+    - ALL
   readOnlyRootFilesystem: true
 
 resources:
@@ -59,21 +61,21 @@ resources:
 nodeSelector: {}
 
 tolerations:
-  # Allow scheduling on control plane nodes
-  - key: "node-role.kubernetes.io/control-plane"
-    operator: "Exists"
-    effect: "NoSchedule"
+# Allow scheduling on control plane nodes
+- key: "node-role.kubernetes.io/control-plane"
+  operator: "Exists"
+  effect: "NoSchedule"
 
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
-        - matchExpressions:
-            - key: karpenter.sh/nodepool
-              operator: DoesNotExist
+      - matchExpressions:
+        - key: karpenter.sh/nodepool
+          operator: DoesNotExist
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
-      - topologyKey: kubernetes.io/hostname
+    - topologyKey: kubernetes.io/hostname
 
 # Webhook configuration (for validating/mutating DONodeClass)
 webhook:
