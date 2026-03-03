@@ -12,6 +12,21 @@ on:
           - integration
           - e2e
           - all
+      region:
+        description: "DigitalOcean region for the test cluster"
+        required: false
+        default: "nyc1"
+        type: string
+      node_size:
+        description: "Droplet size for the test cluster nodes"
+        required: false
+        default: "s-2vcpu-4gb"
+        type: string
+      k8s_version:
+        description: "Kubernetes version (e.g. '1.31' or 'latest')"
+        required: false
+        default: "latest"
+        type: string
   schedule:
     # Run integration tests nightly at 2am UTC
     - cron: "0 2 * * *"
@@ -21,60 +36,97 @@ permissions:
 
 env:
   GO_VERSION: "1.24"
+  CLUSTER_NAME: karpenter-do-ci-${{ github.run_id }}
+  DO_REGION: ${{ github.event.inputs.region || 'nyc1' }}
+  NODE_SIZE: ${{ github.event.inputs.node_size || 's-2vcpu-4gb' }}
+  K8S_VERSION: ${{ github.event.inputs.k8s_version || 'latest' }}
 
 jobs:
+  # -------------------------------------------------------------------
+  # Create a fresh DOKS cluster for the test run
+  # -------------------------------------------------------------------
+  create-cluster:
+    name: Create DOKS Cluster
+    runs-on: ubuntu-latest
+    environment: integration
+    outputs:
+      cluster_id: ${{ steps.create.outputs.cluster_id }}
+      cluster_name: ${{ steps.create.outputs.cluster_name }}
+    steps:
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}" ]; then
+            echo "::error::DIGITALOCEAN_ACCESS_TOKEN secret is not set. Configure it in the 'integration' environment."
+            exit 1
+          fi
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Resolve Kubernetes version
+        id: k8s_version
+        run: |
+          if [ "${{ env.K8S_VERSION }}" = "latest" ]; then
+            VERSION=$(doctl kubernetes options versions -o json | jq -r '.[0].slug')
+          else
+            VERSION=$(doctl kubernetes options versions -o json | jq -r --arg v "${{ env.K8S_VERSION }}" '[.[] | select(.slug | startswith($v))][0].slug')
+          fi
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::Could not resolve Kubernetes version '${{ env.K8S_VERSION }}'"
+            doctl kubernetes options versions
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved Kubernetes version: $VERSION"
+
+      - name: Create DOKS cluster
+        id: create
+        run: |
+          echo "Creating cluster ${{ env.CLUSTER_NAME }} in ${{ env.DO_REGION }}..."
+          doctl kubernetes cluster create "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.DO_REGION }}" \
+            --version "${{ steps.k8s_version.outputs.version }}" \
+            --node-pool "name=default;size=${{ env.NODE_SIZE }};count=2" \
+            --wait \
+            --output json | tee /tmp/cluster.json
+
+          CLUSTER_ID=$(jq -r '.[0].id' /tmp/cluster.json)
+          echo "cluster_id=$CLUSTER_ID" >> "$GITHUB_OUTPUT"
+          echo "cluster_name=${{ env.CLUSTER_NAME }}" >> "$GITHUB_OUTPUT"
+          echo "Cluster created: $CLUSTER_ID"
+
+      - name: Wait for cluster to be running
+        run: |
+          echo "Waiting for cluster nodes to be ready..."
+          doctl kubernetes cluster kubeconfig save "${{ env.CLUSTER_NAME }}"
+          for i in $(seq 1 30); do
+            READY=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready " || true)
+            echo "  Attempt $i: $READY nodes ready"
+            if [ "$READY" -ge 2 ]; then
+              echo "All nodes ready."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Timed out waiting for nodes to become ready"
+          kubectl get nodes
+          exit 1
+
+  # -------------------------------------------------------------------
+  # Integration tests (unit-style tests against live DO API)
+  # -------------------------------------------------------------------
   integration:
     name: Integration Tests
+    needs: create-cluster
     if: github.event.inputs.test_suite != 'e2e'
     runs-on: ubuntu-latest
     environment: integration
     env:
       DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-      DO_CLUSTER_ID: ${{ secrets.DO_CLUSTER_ID }}
-      DO_REGION: ${{ secrets.DO_REGION }}
-      DO_VPC_UUID: ${{ secrets.DO_VPC_UUID }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Validate secrets
-        run: |
-          if [ -z "$DIGITALOCEAN_ACCESS_TOKEN" ]; then
-            echo "::error::DIGITALOCEAN_ACCESS_TOKEN secret is not set. Configure it in the 'integration' environment."
-            exit 1
-          fi
-
-      - name: Run integration tests
-        run: |
-          go test ./test/suites/integration/... -v -count=1 -timeout 30m
-        env:
-          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: integration-test-results
-          path: |
-            **/test-results.xml
-            **/test-output.log
-
-  e2e:
-    name: E2E Tests
-    if: github.event.inputs.test_suite == 'e2e' || github.event.inputs.test_suite == 'all' || github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    environment: integration
-    env:
-      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-      DO_CLUSTER_ID: ${{ secrets.DO_CLUSTER_ID }}
-      DO_REGION: ${{ secrets.DO_REGION }}
-      DO_VPC_UUID: ${{ secrets.DO_VPC_UUID }}
+      DO_CLUSTER_ID: ${{ needs.create-cluster.outputs.cluster_id }}
+      DO_VPC_UUID: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -92,13 +144,105 @@ jobs:
 
       - name: Configure kubectl
         run: |
-          doctl kubernetes cluster kubeconfig save ${{ secrets.DO_CLUSTER_ID }}
+          doctl kubernetes cluster kubeconfig save "${{ needs.create-cluster.outputs.cluster_name }}"
+
+      - name: Resolve VPC UUID
+        id: vpc
+        run: |
+          VPC_UUID=$(doctl kubernetes cluster get "${{ needs.create-cluster.outputs.cluster_id }}" -o json | jq -r '.[0].vpc_uuid')
+          echo "vpc_uuid=$VPC_UUID" >> "$GITHUB_OUTPUT"
+          echo "Cluster VPC: $VPC_UUID"
+
+      - name: Run integration tests
+        run: |
+          go test ./test/suites/integration/... -v -count=1 -timeout 30m
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DO_CLUSTER_ID: ${{ needs.create-cluster.outputs.cluster_id }}
+          DO_REGION: ${{ env.DO_REGION }}
+          DO_VPC_UUID: ${{ steps.vpc.outputs.vpc_uuid }}
+          CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster_name }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: |
+            **/test-results.xml
+            **/test-output.log
+
+  # -------------------------------------------------------------------
+  # E2E tests (deploy Karpenter into the cluster and exercise it)
+  # -------------------------------------------------------------------
+  e2e:
+    name: E2E Tests
+    needs: create-cluster
+    if: github.event.inputs.test_suite == 'e2e' || github.event.inputs.test_suite == 'all' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    environment: integration
+    env:
+      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      DO_CLUSTER_ID: ${{ needs.create-cluster.outputs.cluster_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Configure kubectl
+        run: |
+          doctl kubernetes cluster kubeconfig save "${{ needs.create-cluster.outputs.cluster_name }}"
+
+      - name: Build and load controller image
+        run: |
+          IMG=digitalocean/karpenter-provider-do:ci make docker-build
+          # If the cluster is remote, push to a registry instead;
+          # for now the e2e tests use the built binary directly.
+
+      - name: Install CRDs
+        run: |
+          kubectl apply -f charts/karpenter-do/templates/crd-donodeclass.yaml
+
+      - name: Resolve VPC UUID
+        id: vpc
+        run: |
+          VPC_UUID=$(doctl kubernetes cluster get "${{ needs.create-cluster.outputs.cluster_id }}" -o json | jq -r '.[0].vpc_uuid')
+          echo "vpc_uuid=$VPC_UUID" >> "$GITHUB_OUTPUT"
 
       - name: Run e2e tests
         run: |
           go test ./test/suites/e2e/... -v -count=1 -timeout 60m
         env:
           DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DO_CLUSTER_ID: ${{ needs.create-cluster.outputs.cluster_id }}
+          DO_REGION: ${{ env.DO_REGION }}
+          DO_VPC_UUID: ${{ steps.vpc.outputs.vpc_uuid }}
+          CLUSTER_NAME: ${{ needs.create-cluster.outputs.cluster_name }}
+          CLUSTER_ENDPOINT: ${{ steps.endpoint.outputs.endpoint }}
+
+      - name: Collect cluster diagnostics
+        if: failure()
+        run: |
+          echo "=== Nodes ==="
+          kubectl get nodes -o wide || true
+          echo "=== NodeClaims ==="
+          kubectl get nodeclaims -o wide || true
+          echo "=== DONodeClasses ==="
+          kubectl get donodeclasses -o wide || true
+          echo "=== NodePools ==="
+          kubectl get nodepools -o wide || true
+          echo "=== Karpenter controller logs ==="
+          kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter-do --tail=200 || true
 
       - name: Upload test results
         if: always()
@@ -108,3 +252,43 @@ jobs:
           path: |
             **/test-results.xml
             **/test-output.log
+
+  # -------------------------------------------------------------------
+  # Always delete the cluster, even if tests fail
+  # -------------------------------------------------------------------
+  delete-cluster:
+    name: Delete DOKS Cluster
+    needs: [create-cluster, integration, e2e]
+    if: always() && needs.create-cluster.outputs.cluster_id != ''
+    runs-on: ubuntu-latest
+    environment: integration
+    steps:
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Delete cluster
+        run: |
+          echo "Deleting cluster ${{ needs.create-cluster.outputs.cluster_name }} (${{ needs.create-cluster.outputs.cluster_id }})..."
+          doctl kubernetes cluster delete "${{ needs.create-cluster.outputs.cluster_id }}" \
+            --force \
+            --dangerous
+          echo "Cluster deleted."
+
+      - name: Clean up associated resources
+        run: |
+          echo "Cleaning up volumes and load balancers tagged with the cluster..."
+          # Delete any volumes that were created for the cluster
+          doctl compute volume list --format ID,Name --no-header | \
+            grep "${{ needs.create-cluster.outputs.cluster_name }}" | \
+            awk '{print $1}' | \
+            xargs -r -I {} doctl compute volume delete {} --force || true
+
+          # Delete any load balancers tagged with the cluster
+          doctl compute load-balancer list --format ID,Name --no-header | \
+            grep "${{ needs.create-cluster.outputs.cluster_name }}" | \
+            awk '{print $1}' | \
+            xargs -r -I {} doctl compute load-balancer delete {} --force || true
+
+          echo "Cleanup complete."
