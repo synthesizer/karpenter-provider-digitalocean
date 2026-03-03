@@ -218,7 +218,8 @@ jobs:
 
       - name: Install CRDs
         run: |
-          kubectl apply -f charts/karpenter-do/templates/crd-donodeclass.yaml
+          helm template karpenter-do charts/karpenter-do \
+            --show-only templates/crd-donodeclass.yaml | kubectl apply -f -
 
       - name: Resolve VPC UUID and endpoint
         id: cluster_info
