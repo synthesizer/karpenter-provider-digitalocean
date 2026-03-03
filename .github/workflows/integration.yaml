@@ -210,9 +210,6 @@ jobs:
       # ── Build and push controller image to DOCR ──────────────────────
       - name: Prepare DOCR registry
         run: |
-          # Disconnect the cluster from any existing registry first.
-          doctl kubernetes cluster registry remove "${{ needs.create-cluster.outputs.cluster_name }}" 2>/dev/null || true
-
           # Delete and recreate the registry to guarantee a clean slate.
           # The starter tier only allows 1 repository, and leftover repo
           # metadata blocks new pushes even after tag deletion + GC.
@@ -228,14 +225,6 @@ jobs:
           doctl registry create karpenter-ci --subscription-tier starter
           echo "DOCR registry ready"
 
-      - name: Connect DOCR to DOKS cluster
-        run: |
-          # Add fresh registry credentials to the DOKS cluster.
-          doctl kubernetes cluster registry add "${{ needs.create-cluster.outputs.cluster_name }}"
-          # Give credentials time to propagate to kubelet on nodes.
-          sleep 15
-          echo "DOCR connected to cluster"
-
       - name: Login to DOCR
         run: doctl registry login
 
@@ -247,6 +236,19 @@ jobs:
           docker push "$IMAGE"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "Pushed $IMAGE"
+
+      - name: Create DOCR imagePullSecret
+        run: |
+          # Create an explicit docker-registry secret so the deployment can
+          # pull the image.  This is more reliable than the DOKS-level
+          # registry integration (doctl kubernetes cluster registry add)
+          # which can take minutes to propagate to kubelets.
+          kubectl -n kube-system delete secret docr-pull-secret 2>/dev/null || true
+          kubectl -n kube-system create secret docker-registry docr-pull-secret \
+            --docker-server=registry.digitalocean.com \
+            --docker-username=${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }} \
+            --docker-password=${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          echo "imagePullSecret created in kube-system"
 
       # ── Install CRDs ─────────────────────────────────────────────────
       - name: Install Karpenter core CRDs
@@ -283,6 +285,7 @@ jobs:
             --set settings.clusterID=${{ needs.create-cluster.outputs.cluster_id }} \
             --set settings.clusterRegion=${{ env.DO_REGION }} \
             --set digitalocean.accessToken=${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }} \
+            --set imagePullSecrets[0].name=docr-pull-secret \
             --wait --timeout 5m
 
       - name: Wait for controller to be ready
