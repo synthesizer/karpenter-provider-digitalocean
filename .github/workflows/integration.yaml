@@ -210,19 +210,36 @@ jobs:
       # ── Build and push controller image to DOCR ──────────────────────
       - name: Prepare DOCR registry
         run: |
-          # Delete and recreate the registry so stale repos from prior CI runs
-          # don't hit the starter-tier 1-repository limit.
-          for i in 1 2 3 4 5; do
-            if doctl registry delete --force 2>&1; then
-              echo "Old registry deleted (attempt $i)"
-              break
+          # Create registry if it doesn't exist (idempotent).
+          # Don't delete — that would break the DOKS cluster's auth credentials.
+          doctl registry create karpenter-ci --subscription-tier starter 2>/dev/null || true
+
+          # Clean up stale repos that aren't "karpenter-do" (shouldn't exist,
+          # but guards against the starter-tier 1-repo limit).
+          for repo in $(doctl registry repository list-v2 -o json 2>/dev/null | jq -r '.[].repository_name // empty' 2>/dev/null); do
+            if [ "$repo" != "karpenter-do" ]; then
+              echo "Deleting stale repo: $repo"
+              doctl registry repository delete-manifest "$repo" --force 2>/dev/null || true
             fi
-            echo "Delete attempt $i failed (GC may be active), retrying in 15s..."
-            sleep 15
           done
-          sleep 5
-          doctl registry create karpenter-ci --subscription-tier starter
-          echo "Fresh DOCR registry ready"
+
+          # Delete old CI tags from karpenter-do repo to free space.
+          for tag in $(doctl registry repository list-tags karpenter-do -o json 2>/dev/null | jq -r '.[].tag // empty' 2>/dev/null); do
+            if [ "$tag" != "ci-${{ github.run_id }}" ]; then
+              echo "Deleting old tag: $tag"
+              doctl registry repository delete-tag karpenter-do "$tag" --force 2>/dev/null || true
+            fi
+          done
+
+          # Run garbage collection to reclaim storage before pushing.
+          doctl registry garbage-collection start --force 2>/dev/null || true
+          sleep 10
+          echo "DOCR registry ready"
+
+      - name: Connect DOCR to DOKS cluster
+        run: |
+          # Ensure DOKS cluster has pull credentials for the registry.
+          doctl kubernetes cluster registry add "${{ needs.create-cluster.outputs.cluster_name }}"
 
       - name: Login to DOCR
         run: doctl registry login
@@ -232,13 +249,18 @@ jobs:
         run: |
           IMAGE="registry.digitalocean.com/karpenter-ci/karpenter-do:ci-${{ github.run_id }}"
           docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "Pushed $IMAGE"
-
-      - name: Connect DOCR to DOKS cluster
-        run: |
-          doctl kubernetes cluster registry add "${{ needs.create-cluster.outputs.cluster_name }}" || true
+          # Retry push — GC may still be running on starter tier.
+          for attempt in 1 2 3; do
+            if docker push "$IMAGE" 2>&1; then
+              echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+              echo "Pushed $IMAGE (attempt $attempt)"
+              exit 0
+            fi
+            echo "Push attempt $attempt failed, waiting 30s..."
+            sleep 30
+          done
+          echo "::error::Failed to push image after 3 attempts"
+          exit 1
 
       # ── Install CRDs ─────────────────────────────────────────────────
       - name: Install Karpenter core CRDs
