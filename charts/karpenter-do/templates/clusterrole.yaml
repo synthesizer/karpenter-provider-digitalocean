@@ -29,9 +29,9 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumes", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
-  # Storage classes
+  # Storage classes and volume attachments
   - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses", "csinodes"]
+    resources: ["storageclasses", "csinodes", "volumeattachments"]
     verbs: ["get", "list", "watch"]
   # Coordination for leader election
   - apiGroups: ["coordination.k8s.io"]
