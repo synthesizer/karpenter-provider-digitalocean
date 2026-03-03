@@ -17,6 +17,8 @@ settings:
   clusterName: ""
   # Kubernetes API server endpoint (e.g., https://xxx.k8s.ondigitalocean.com)
   clusterEndpoint: ""
+  # DOKS cluster ID (UUID from DigitalOcean)
+  clusterID: ""
 
 # DigitalOcean configuration
 digitalocean:

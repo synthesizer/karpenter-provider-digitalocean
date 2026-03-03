@@ -16,42 +16,38 @@ limitations under the License.
 
 package instance
 
-import (
-	"time"
-)
+import "time"
 
-// Instance represents a DigitalOcean Droplet managed by Karpenter.
+// Instance represents a DigitalOcean Kubernetes node managed by Karpenter.
+// Each Instance corresponds to a single node within a DOKS Node Pool that
+// was created by Karpenter (1 node pool = 1 node = 1 NodeClaim).
 type Instance struct {
-	// ID is the DigitalOcean Droplet ID.
-	ID int
+	// NodePoolID is the DOKS Node Pool ID this node belongs to.
+	// This is the primary identifier used for deletion (delete the whole pool).
+	NodePoolID string
 
-	// Name is the Droplet name (typically the NodeClaim name).
+	// DropletID is the underlying DigitalOcean Droplet ID for this node.
+	// Used to construct the Kubernetes provider ID (digitalocean://<dropletID>).
+	DropletID string
+
+	// Name is the node name as assigned by DOKS.
 	Name string
 
 	// Region is the region slug (e.g., "nyc1").
 	Region string
 
-	// Size is the size slug (e.g., "s-2vcpu-4gb").
+	// Size is the Droplet size slug (e.g., "s-2vcpu-4gb").
 	Size string
 
-	// Status is the Droplet status (e.g., "new", "active", "off", "archive").
+	// Status is the DOKS node status (e.g., "provisioning", "running", "draining", "deleting").
 	Status string
 
-	// PrivateIPv4 is the private IP address within the VPC.
-	PrivateIPv4 string
+	// Labels are the Kubernetes labels from the node pool, propagated to the node.
+	Labels map[string]string
 
-	// PublicIPv4 is the public IPv4 address, if assigned.
-	PublicIPv4 string
-
-	// Tags are the Droplet's tags.
+	// Tags are the DOKS Node Pool's tags.
 	Tags []string
 
-	// CreatedAt is when the Droplet was created.
+	// CreatedAt is the timestamp when the node was created.
 	CreatedAt time.Time
-
-	// ImageID is the image used to create the Droplet.
-	ImageID int
-
-	// VPCUUID is the VPC the Droplet is placed in.
-	VPCUUID string
 }

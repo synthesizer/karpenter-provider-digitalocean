@@ -22,7 +22,6 @@ limitations under the License.
 //   - DIGITALOCEAN_ACCESS_TOKEN: a valid DigitalOcean API token
 //   - DO_CLUSTER_ID: the DOKS cluster ID
 //   - DO_REGION: the region the cluster is in (default: nyc1)
-//   - DO_VPC_UUID: the VPC UUID of the cluster
 //   - CLUSTER_NAME: the cluster name
 //   - CLUSTER_ENDPOINT: the cluster API endpoint
 package e2e
@@ -47,7 +46,6 @@ var (
 	restConfig    *rest.Config
 
 	testRegion          string
-	testVPCUUID         string
 	testClusterName     string
 	testClusterID       string
 	testClusterEndpoint string
@@ -96,7 +94,6 @@ func TestMain(m *testing.M) {
 	if testRegion == "" {
 		testRegion = "nyc1"
 	}
-	testVPCUUID = os.Getenv("DO_VPC_UUID")
 	testClusterName = os.Getenv("CLUSTER_NAME")
 	testClusterID = os.Getenv("DO_CLUSTER_ID")
 	testClusterEndpoint = os.Getenv("CLUSTER_ENDPOINT")

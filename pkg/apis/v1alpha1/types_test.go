@@ -55,9 +55,9 @@ func TestSetConditions(t *testing.T) {
 			Reason: "Ready",
 		},
 		{
-			Type:   ConditionTypeImageResolved,
+			Type:   ConditionTypeValidRegion,
 			Status: metav1.ConditionTrue,
-			Reason: "Resolved",
+			Reason: "Valid",
 		},
 	}
 
@@ -90,27 +90,15 @@ func TestStatusConditions(t *testing.T) {
 }
 
 func TestDONodeClassDeepCopy(t *testing.T) {
-	userData := "#!/bin/bash\necho hello"
 	nc := &DONodeClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-class",
 		},
 		Spec: DONodeClassSpec{
-			Region:  "nyc1",
-			VPCUUID: "vpc-123",
-			Image: DONodeClassImage{
-				Slug: "ubuntu-24-04-x64",
-			},
-			SSHKeys:  []string{"fp1", "fp2"},
-			Tags:     []string{"env:test"},
-			UserData: &userData,
-			BlockStorage: &DOBlockStorageSpec{
-				SizeGiB: 100,
-				FSType:  "ext4",
-			},
+			Region: "nyc1",
+			Tags:   []string{"env:test", "team:platform"},
 		},
 		Status: DONodeClassStatus{
-			ImageID: 12345,
 			Conditions: []status.Condition{
 				{
 					Type:   ConditionTypeReady,
@@ -129,6 +117,9 @@ func TestDONodeClassDeepCopy(t *testing.T) {
 	if copied.Spec.Region != nc.Spec.Region {
 		t.Errorf("DeepCopy region = %q, want %q", copied.Spec.Region, nc.Spec.Region)
 	}
+	if len(copied.Spec.Tags) != len(nc.Spec.Tags) {
+		t.Errorf("DeepCopy tags length = %d, want %d", len(copied.Spec.Tags), len(nc.Spec.Tags))
+	}
 
 	// Modify the copy and verify the original is not affected
 	copied.Spec.Region = "sfo3"
@@ -136,15 +127,77 @@ func TestDONodeClassDeepCopy(t *testing.T) {
 		t.Error("modifying copy affected original — DeepCopy is not deep")
 	}
 
-	// Verify slice independence
-	copied.Spec.SSHKeys[0] = "modified"
-	if nc.Spec.SSHKeys[0] == "modified" {
-		t.Error("modifying copy's SSHKeys affected original")
+	// Verify slice independence (tags)
+	copied.Spec.Tags[0] = "modified"
+	if nc.Spec.Tags[0] == "modified" {
+		t.Error("modifying copy's Tags affected original")
 	}
 
-	// Verify pointer independence
-	*copied.Spec.UserData = "changed"
-	if *nc.Spec.UserData == "changed" {
-		t.Error("modifying copy's UserData affected original")
+	// Verify conditions slice independence
+	copied.Status.Conditions[0].Status = metav1.ConditionFalse
+	if nc.Status.Conditions[0].Status == metav1.ConditionFalse {
+		t.Error("modifying copy's Conditions affected original")
+	}
+}
+
+func TestDONodeClassListDeepCopy(t *testing.T) {
+	list := &DONodeClassList{
+		Items: []DONodeClass{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "class-1"},
+				Spec:       DONodeClassSpec{Region: "nyc1"},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "class-2"},
+				Spec:       DONodeClassSpec{Region: "sfo3", Tags: []string{"env:staging"}},
+			},
+		},
+	}
+
+	copied := list.DeepCopy()
+
+	if len(copied.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(copied.Items))
+	}
+
+	// Modify the copy
+	copied.Items[0].Spec.Region = "ams3"
+	if list.Items[0].Spec.Region == "ams3" {
+		t.Error("modifying copied list affected original")
+	}
+}
+
+func TestDONodeClassSpecOnlyRegionAndTags(t *testing.T) {
+	// Verify DONodeClassSpec structure — only Region and Tags should exist
+	spec := DONodeClassSpec{
+		Region: "nyc1",
+		Tags:   []string{"karpenter", "env:prod"},
+	}
+
+	if spec.Region != "nyc1" {
+		t.Errorf("expected region nyc1, got %s", spec.Region)
+	}
+	if len(spec.Tags) != 2 {
+		t.Errorf("expected 2 tags, got %d", len(spec.Tags))
+	}
+}
+
+func TestDONodeClassStatusNoImageID(t *testing.T) {
+	// Verify DONodeClassStatus structure — no ImageID field, only Conditions and SpecHash
+	s := DONodeClassStatus{
+		SpecHash: "abc123",
+		Conditions: []status.Condition{
+			{
+				Type:   ConditionTypeValidRegion,
+				Status: metav1.ConditionTrue,
+			},
+		},
+	}
+
+	if s.SpecHash != "abc123" {
+		t.Errorf("expected specHash abc123, got %s", s.SpecHash)
+	}
+	if len(s.Conditions) != 1 {
+		t.Errorf("expected 1 condition, got %d", len(s.Conditions))
 	}
 }

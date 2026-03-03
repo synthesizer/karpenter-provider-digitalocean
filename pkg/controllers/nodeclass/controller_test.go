@@ -18,7 +18,6 @@ package nodeclass
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,7 +36,7 @@ func newTestScheme() *runtime.Scheme {
 	return s
 }
 
-func TestReconcileImageResolution(t *testing.T) {
+func TestReconcileValidRegion(t *testing.T) {
 	ctx := context.Background()
 
 	nodeClass := &v1alpha1.DONodeClass{
@@ -46,7 +45,6 @@ func TestReconcileImageResolution(t *testing.T) {
 		},
 		Spec: v1alpha1.DONodeClassSpec{
 			Region: "nyc1",
-			Image:  v1alpha1.DONodeClassImage{Slug: "ubuntu-24-04-x64"},
 		},
 	}
 
@@ -57,16 +55,12 @@ func TestReconcileImageResolution(t *testing.T) {
 		WithStatusSubresource(&v1alpha1.DONodeClass{}).
 		Build()
 
-	imageProvider := fakeproviders.NewImageProvider()
-	imageProvider.DefaultImageID = 12345678
-	vpcProvider := fakeproviders.NewVPCProvider()
-
-	controller := NewController(kubeClient, imageProvider, vpcProvider)
+	regionProvider := fakeproviders.NewRegionProvider()
+	controller := NewController(kubeClient, regionProvider, "nyc1")
 
 	result, err := controller.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-class"},
 	})
-
 	if err != nil {
 		t.Fatalf("Reconcile() unexpected error: %v", err)
 	}
@@ -74,39 +68,34 @@ func TestReconcileImageResolution(t *testing.T) {
 		t.Error("expected no requeue")
 	}
 
-	// Verify the image ID was set
+	// Verify conditions
 	updated := &v1alpha1.DONodeClass{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Name: "test-class"}, updated); err != nil {
 		t.Fatalf("failed to get updated DONodeClass: %v", err)
 	}
-	if updated.Status.ImageID != 12345678 {
-		t.Errorf("expected imageID 12345678, got %d", updated.Status.ImageID)
-	}
-
-	// Verify conditions
 	if len(updated.Status.Conditions) == 0 {
 		t.Fatal("expected conditions to be set")
 	}
 
-	foundImageResolved := false
+	foundValidRegion := false
 	foundReady := false
 	for _, c := range updated.Status.Conditions {
-		if c.Type == v1alpha1.ConditionTypeImageResolved && c.Status == metav1.ConditionTrue {
-			foundImageResolved = true
+		if c.Type == v1alpha1.ConditionTypeValidRegion && c.Status == metav1.ConditionTrue {
+			foundValidRegion = true
 		}
 		if c.Type == v1alpha1.ConditionTypeReady && c.Status == metav1.ConditionTrue {
 			foundReady = true
 		}
 	}
-	if !foundImageResolved {
-		t.Error("expected ImageResolved condition to be True")
+	if !foundValidRegion {
+		t.Error("expected ValidRegion condition to be True")
 	}
 	if !foundReady {
 		t.Error("expected Ready condition to be True")
 	}
 }
 
-func TestReconcileImageResolutionFailure(t *testing.T) {
+func TestReconcileRegionNotAvailable(t *testing.T) {
 	ctx := context.Background()
 
 	nodeClass := &v1alpha1.DONodeClass{
@@ -114,8 +103,7 @@ func TestReconcileImageResolutionFailure(t *testing.T) {
 			Name: "test-class",
 		},
 		Spec: v1alpha1.DONodeClassSpec{
-			Region: "nyc1",
-			Image:  v1alpha1.DONodeClassImage{Slug: "nonexistent-image"},
+			Region: "nonexistent-region",
 		},
 	}
 
@@ -126,18 +114,14 @@ func TestReconcileImageResolutionFailure(t *testing.T) {
 		WithStatusSubresource(&v1alpha1.DONodeClass{}).
 		Build()
 
-	imageProvider := fakeproviders.NewImageProvider()
-	imageProvider.ResolveError = fmt.Errorf("image not found")
-	vpcProvider := fakeproviders.NewVPCProvider()
-
-	controller := NewController(kubeClient, imageProvider, vpcProvider)
+	regionProvider := fakeproviders.NewRegionProvider()
+	controller := NewController(kubeClient, regionProvider, "nyc1")
 
 	_, err := controller.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-class"},
 	})
-
 	if err == nil {
-		t.Fatal("expected error from failed image resolution")
+		t.Fatal("expected error from unavailable region")
 	}
 
 	// Verify the failed condition was set
@@ -147,24 +131,23 @@ func TestReconcileImageResolutionFailure(t *testing.T) {
 	}
 
 	for _, c := range updated.Status.Conditions {
-		if c.Type == v1alpha1.ConditionTypeImageResolved && c.Status == metav1.ConditionFalse {
+		if c.Type == v1alpha1.ConditionTypeValidRegion && c.Status == metav1.ConditionFalse {
 			return // success
 		}
 	}
-	t.Error("expected ImageResolved condition to be False")
+	t.Error("expected ValidRegion condition to be False")
 }
 
-func TestReconcileWithVPCValidation(t *testing.T) {
+func TestReconcileRegionMismatch(t *testing.T) {
 	ctx := context.Background()
 
+	// DONodeClass region doesn't match cluster region
 	nodeClass := &v1alpha1.DONodeClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-class",
 		},
 		Spec: v1alpha1.DONodeClassSpec{
-			Region:  "nyc1",
-			Image:   v1alpha1.DONodeClassImage{ID: 12345678},
-			VPCUUID: "vpc-123",
+			Region: "sfo3",
 		},
 	}
 
@@ -175,71 +158,14 @@ func TestReconcileWithVPCValidation(t *testing.T) {
 		WithStatusSubresource(&v1alpha1.DONodeClass{}).
 		Build()
 
-	imageProvider := fakeproviders.NewImageProvider()
-	vpcProvider := fakeproviders.NewVPCProvider()
-
-	controller := NewController(kubeClient, imageProvider, vpcProvider)
-
-	result, err := controller.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-class"},
-	})
-
-	if err != nil {
-		t.Fatalf("Reconcile() unexpected error: %v", err)
-	}
-	if result.Requeue {
-		t.Error("expected no requeue")
-	}
-
-	// Verify the VPC condition was set
-	updated := &v1alpha1.DONodeClass{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: "test-class"}, updated); err != nil {
-		t.Fatalf("failed to get updated DONodeClass: %v", err)
-	}
-
-	foundVPCValid := false
-	for _, c := range updated.Status.Conditions {
-		if c.Type == v1alpha1.ConditionTypeVPCValid && c.Status == metav1.ConditionTrue {
-			foundVPCValid = true
-		}
-	}
-	if !foundVPCValid {
-		t.Error("expected VPCValid condition to be True")
-	}
-}
-
-func TestReconcileWithInvalidVPC(t *testing.T) {
-	ctx := context.Background()
-
-	nodeClass := &v1alpha1.DONodeClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-class",
-		},
-		Spec: v1alpha1.DONodeClassSpec{
-			Region:  "nyc1",
-			Image:   v1alpha1.DONodeClassImage{ID: 12345678},
-			VPCUUID: "nonexistent-vpc",
-		},
-	}
-
-	s := newTestScheme()
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(nodeClass).
-		WithStatusSubresource(&v1alpha1.DONodeClass{}).
-		Build()
-
-	imageProvider := fakeproviders.NewImageProvider()
-	vpcProvider := fakeproviders.NewVPCProvider()
-
-	controller := NewController(kubeClient, imageProvider, vpcProvider)
+	regionProvider := fakeproviders.NewRegionProvider()
+	controller := NewController(kubeClient, regionProvider, "nyc1") // cluster is in nyc1, DONodeClass says sfo3
 
 	_, err := controller.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-class"},
 	})
-
 	if err == nil {
-		t.Fatal("expected error from invalid VPC")
+		t.Fatal("expected error from region mismatch")
 	}
 
 	// Verify the failed condition was set
@@ -249,61 +175,13 @@ func TestReconcileWithInvalidVPC(t *testing.T) {
 	}
 
 	for _, c := range updated.Status.Conditions {
-		if c.Type == v1alpha1.ConditionTypeVPCValid && c.Status == metav1.ConditionFalse {
-			return // success
+		if c.Type == v1alpha1.ConditionTypeValidRegion && c.Status == metav1.ConditionFalse {
+			if c.Reason == "RegionMismatch" {
+				return // success
+			}
 		}
 	}
-	t.Error("expected VPCValid condition to be False")
-}
-
-func TestReconcileWithNoVPC(t *testing.T) {
-	ctx := context.Background()
-
-	nodeClass := &v1alpha1.DONodeClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-class",
-		},
-		Spec: v1alpha1.DONodeClassSpec{
-			Region: "nyc1",
-			Image:  v1alpha1.DONodeClassImage{ID: 12345678},
-			// No VPC specified
-		},
-	}
-
-	s := newTestScheme()
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(nodeClass).
-		WithStatusSubresource(&v1alpha1.DONodeClass{}).
-		Build()
-
-	imageProvider := fakeproviders.NewImageProvider()
-	vpcProvider := fakeproviders.NewVPCProvider()
-
-	controller := NewController(kubeClient, imageProvider, vpcProvider)
-
-	result, err := controller.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-class"},
-	})
-
-	if err != nil {
-		t.Fatalf("Reconcile() unexpected error: %v", err)
-	}
-	if result.Requeue {
-		t.Error("expected no requeue")
-	}
-
-	// Verify no VPCValid condition was set (since no VPC was specified)
-	updated := &v1alpha1.DONodeClass{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: "test-class"}, updated); err != nil {
-		t.Fatalf("failed to get updated DONodeClass: %v", err)
-	}
-
-	for _, c := range updated.Status.Conditions {
-		if c.Type == v1alpha1.ConditionTypeVPCValid {
-			t.Error("should not set VPCValid condition when no VPC is specified")
-		}
-	}
+	t.Error("expected ValidRegion condition to be False with RegionMismatch reason")
 }
 
 func TestReconcileNotFound(t *testing.T) {
@@ -314,16 +192,13 @@ func TestReconcileNotFound(t *testing.T) {
 		WithScheme(s).
 		Build()
 
-	imageProvider := fakeproviders.NewImageProvider()
-	vpcProvider := fakeproviders.NewVPCProvider()
-
-	controller := NewController(kubeClient, imageProvider, vpcProvider)
+	regionProvider := fakeproviders.NewRegionProvider()
+	controller := NewController(kubeClient, regionProvider, "nyc1")
 
 	// Reconcile a non-existent DONodeClass — should return no error (IgnoreNotFound)
 	result, err := controller.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "nonexistent"},
 	})
-
 	if err != nil {
 		t.Fatalf("expected no error for not found, got: %v", err)
 	}
@@ -388,5 +263,55 @@ func TestSetConditionPreservesTransitionTime(t *testing.T) {
 	controller.setCondition(nodeClass, "TestCondition", metav1.ConditionTrue, "StillOK", "still ok")
 	if !nodeClass.Status.Conditions[0].LastTransitionTime.Equal(&originalTime) {
 		t.Error("LastTransitionTime should be preserved when status doesn't change")
+	}
+}
+
+func TestReconcileWithTags(t *testing.T) {
+	ctx := context.Background()
+
+	nodeClass := &v1alpha1.DONodeClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-class-with-tags",
+		},
+		Spec: v1alpha1.DONodeClassSpec{
+			Region: "nyc1",
+			Tags:   []string{"env:prod", "team:platform"},
+		},
+	}
+
+	s := newTestScheme()
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(nodeClass).
+		WithStatusSubresource(&v1alpha1.DONodeClass{}).
+		Build()
+
+	regionProvider := fakeproviders.NewRegionProvider()
+	controller := NewController(kubeClient, regionProvider, "nyc1")
+
+	result, err := controller.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-class-with-tags"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() unexpected error: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+
+	// Verify Ready condition
+	updated := &v1alpha1.DONodeClass{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Name: "test-class-with-tags"}, updated); err != nil {
+		t.Fatalf("failed to get updated DONodeClass: %v", err)
+	}
+
+	foundReady := false
+	for _, c := range updated.Status.Conditions {
+		if c.Type == v1alpha1.ConditionTypeReady && c.Status == metav1.ConditionTrue {
+			foundReady = true
+		}
+	}
+	if !foundReady {
+		t.Error("expected Ready condition to be True")
 	}
 }

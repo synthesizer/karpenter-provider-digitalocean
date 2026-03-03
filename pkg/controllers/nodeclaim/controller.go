@@ -30,7 +30,7 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// GarbageCollectionController reconciles NodeClaims to clean up orphaned droplets.
+// GarbageCollectionController reconciles NodeClaims to clean up orphaned DOKS node pools.
 type GarbageCollectionController struct {
 	client           client.Client
 	instanceProvider instance.Provider
@@ -44,14 +44,15 @@ func NewGarbageCollectionController(client client.Client, instanceProvider insta
 	}
 }
 
-// Reconcile handles orphaned droplet cleanup.
-// It lists all karpenter-managed droplets and checks if each has a corresponding NodeClaim.
-// Droplets without a NodeClaim are considered orphaned and are deleted.
+// Reconcile handles orphaned DOKS node pool cleanup.
+// It lists all Karpenter-managed instances from DOKS node pools and checks if
+// each has a corresponding NodeClaim. Node pools without a NodeClaim are
+// considered orphaned and are deleted.
 func (c *GarbageCollectionController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("running garbage collection reconciliation")
 
-	// List all managed instances
+	// List all managed instances from DOKS node pools
 	instances, err := c.instanceProvider.List(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing instances: %w", err)
@@ -63,7 +64,8 @@ func (c *GarbageCollectionController) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("listing NodeClaims: %w", err)
 	}
 
-	// Build set of known provider IDs
+	// Build set of known provider IDs from NodeClaims
+	// Provider ID format: digitalocean://<dropletID>
 	knownIDs := make(map[string]bool)
 	for _, nc := range nodeClaimList.Items {
 		if nc.Status.ProviderID != "" {
@@ -71,13 +73,20 @@ func (c *GarbageCollectionController) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
-	// Find and delete orphaned instances
+	// Find and delete orphaned node pools
 	for _, inst := range instances {
-		providerID := fmt.Sprintf("digitalocean://%s/%d", inst.Region, inst.ID)
+		providerID := fmt.Sprintf("digitalocean://%s", inst.DropletID)
 		if !knownIDs[providerID] {
-			logger.Info("deleting orphaned droplet", "id", inst.ID, "name", inst.Name)
-			if err := c.instanceProvider.Delete(ctx, fmt.Sprintf("%d", inst.ID)); err != nil {
-				logger.Error(err, "failed to delete orphaned droplet", "id", inst.ID)
+			logger.Info("deleting orphaned DOKS node pool",
+				"nodePoolID", inst.NodePoolID,
+				"dropletID", inst.DropletID,
+				"name", inst.Name,
+			)
+			if err := c.instanceProvider.Delete(ctx, inst.NodePoolID); err != nil {
+				logger.Error(err, "failed to delete orphaned DOKS node pool",
+					"nodePoolID", inst.NodePoolID,
+					"dropletID", inst.DropletID,
+				)
 			}
 		}
 	}

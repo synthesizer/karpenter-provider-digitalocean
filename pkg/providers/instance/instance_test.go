@@ -18,6 +18,7 @@ package instance
 
 import (
 	"testing"
+	"time"
 
 	"github.com/digitalocean/godo"
 )
@@ -71,161 +72,120 @@ func TestHasTag(t *testing.T) {
 	}
 }
 
-func TestDerefString(t *testing.T) {
+func TestNodePoolNodeToInstance(t *testing.T) {
+	createdAt := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		name     string
-		input    *string
-		expected string
-	}{
-		{
-			name:     "nil pointer",
-			input:    nil,
-			expected: "",
-		},
-		{
-			name:     "non-nil pointer with value",
-			input:    strPtr("hello world"),
-			expected: "hello world",
-		},
-		{
-			name:     "non-nil pointer with empty string",
-			input:    strPtr(""),
-			expected: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := derefString(tt.input)
-			if got != tt.expected {
-				t.Errorf("derefString() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestDropletToInstance(t *testing.T) {
-	tests := []struct {
-		name     string
-		droplet  *godo.Droplet
+		np       *godo.KubernetesNodePool
+		node     *godo.KubernetesNode
+		region   string
 		expected *Instance
 	}{
 		{
-			name: "full droplet conversion",
-			droplet: &godo.Droplet{
-				ID:   12345,
-				Name: "test-node",
-				Region: &godo.Region{
-					Slug: "nyc1",
-					Name: "New York 1",
-				},
-				Size: &godo.Size{
-					Slug: "s-2vcpu-4gb",
-				},
-				Status:  "active",
-				Tags:    []string{"karpenter-managed", "karpenter-cluster-test"},
-				VPCUUID: "vpc-abc-123",
-				Image: &godo.Image{
-					ID:   99999,
-					Slug: "ubuntu-24-04-x64",
-				},
-				Networks: &godo.Networks{
-					V4: []godo.NetworkV4{
-						{IPAddress: "10.0.0.2", Type: "private"},
-						{IPAddress: "1.2.3.4", Type: "public"},
-					},
+			name: "full node pool node conversion",
+			np: &godo.KubernetesNodePool{
+				ID:   "pool-abc-123",
+				Name: "karp-test-node",
+				Size: "s-2vcpu-4gb",
+				Tags: []string{"karpenter-managed", "karpenter-cluster-test"},
+				Labels: map[string]string{
+					"karpenter.do.sh/instance-size": "s-2vcpu-4gb",
+					"karpenter.do.sh/region":        "nyc1",
 				},
 			},
+			node: &godo.KubernetesNode{
+				ID:        "node-xyz",
+				Name:      "karp-test-node-abc",
+				DropletID: "12345",
+				Status: &godo.KubernetesNodeStatus{
+					State: "running",
+				},
+				CreatedAt: createdAt,
+			},
+			region: "nyc1",
 			expected: &Instance{
-				ID:          12345,
-				Name:        "test-node",
-				Region:      "nyc1",
-				Size:        "s-2vcpu-4gb",
-				Status:      "active",
-				PrivateIPv4: "10.0.0.2",
-				PublicIPv4:  "1.2.3.4",
-				Tags:        []string{"karpenter-managed", "karpenter-cluster-test"},
-				ImageID:     99999,
-				VPCUUID:     "vpc-abc-123",
+				NodePoolID: "pool-abc-123",
+				DropletID:  "12345",
+				Name:       "karp-test-node-abc",
+				Region:     "nyc1",
+				Size:       "s-2vcpu-4gb",
+				Status:     "running",
+				Tags:       []string{"karpenter-managed", "karpenter-cluster-test"},
+				Labels: map[string]string{
+					"karpenter.do.sh/instance-size": "s-2vcpu-4gb",
+					"karpenter.do.sh/region":        "nyc1",
+				},
+				CreatedAt: createdAt,
 			},
 		},
 		{
-			name: "droplet with no networks",
-			droplet: &godo.Droplet{
-				ID:   67890,
-				Name: "no-net-node",
-				Region: &godo.Region{
-					Slug: "sfo3",
-				},
-				Size: &godo.Size{
-					Slug: "s-1vcpu-1gb",
-				},
-				Status: "new",
+			name: "node with nil status",
+			np: &godo.KubernetesNodePool{
+				ID:   "pool-def-456",
+				Name: "karp-no-status",
+				Size: "s-1vcpu-1gb",
 			},
+			node: &godo.KubernetesNode{
+				ID:        "node-no-status",
+				Name:      "karp-no-status-node",
+				DropletID: "67890",
+				Status:    nil,
+				CreatedAt: createdAt,
+			},
+			region: "sfo3",
 			expected: &Instance{
-				ID:     67890,
-				Name:   "no-net-node",
-				Region: "sfo3",
-				Size:   "s-1vcpu-1gb",
-				Status: "new",
+				NodePoolID: "pool-def-456",
+				DropletID:  "67890",
+				Name:       "karp-no-status-node",
+				Region:     "sfo3",
+				Size:       "s-1vcpu-1gb",
+				Status:     "",
+				CreatedAt:  createdAt,
 			},
 		},
 		{
-			name: "droplet with private IP only",
-			droplet: &godo.Droplet{
-				ID:   11111,
-				Name: "private-only",
-				Region: &godo.Region{
-					Slug: "ams3",
-				},
-				Size: &godo.Size{
-					Slug: "g-2vcpu-8gb",
-				},
-				Status: "active",
-				Networks: &godo.Networks{
-					V4: []godo.NetworkV4{
-						{IPAddress: "10.10.10.5", Type: "private"},
-					},
-				},
+			name: "node with empty labels and tags",
+			np: &godo.KubernetesNodePool{
+				ID:     "pool-ghi-789",
+				Name:   "karp-minimal",
+				Size:   "g-2vcpu-8gb",
+				Tags:   nil,
+				Labels: nil,
 			},
+			node: &godo.KubernetesNode{
+				ID:        "node-minimal",
+				Name:      "karp-minimal-node",
+				DropletID: "11111",
+				Status: &godo.KubernetesNodeStatus{
+					State: "provisioning",
+				},
+				CreatedAt: createdAt,
+			},
+			region: "ams3",
 			expected: &Instance{
-				ID:          11111,
-				Name:        "private-only",
-				Region:      "ams3",
-				Size:        "g-2vcpu-8gb",
-				Status:      "active",
-				PrivateIPv4: "10.10.10.5",
-			},
-		},
-		{
-			name: "droplet with no image",
-			droplet: &godo.Droplet{
-				ID:   22222,
-				Name: "no-image",
-				Region: &godo.Region{
-					Slug: "lon1",
-				},
-				Size: &godo.Size{
-					Slug: "s-1vcpu-1gb",
-				},
-				Status: "active",
-			},
-			expected: &Instance{
-				ID:     22222,
-				Name:   "no-image",
-				Region: "lon1",
-				Size:   "s-1vcpu-1gb",
-				Status: "active",
+				NodePoolID: "pool-ghi-789",
+				DropletID:  "11111",
+				Name:       "karp-minimal-node",
+				Region:     "ams3",
+				Size:       "g-2vcpu-8gb",
+				Status:     "provisioning",
+				Tags:       nil,
+				Labels:     nil,
+				CreatedAt:  createdAt,
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := dropletToInstance(tt.droplet)
+			got := nodePoolNodeToInstance(tt.np, tt.node, tt.region)
 
-			if got.ID != tt.expected.ID {
-				t.Errorf("ID = %d, want %d", got.ID, tt.expected.ID)
+			if got.NodePoolID != tt.expected.NodePoolID {
+				t.Errorf("NodePoolID = %q, want %q", got.NodePoolID, tt.expected.NodePoolID)
+			}
+			if got.DropletID != tt.expected.DropletID {
+				t.Errorf("DropletID = %q, want %q", got.DropletID, tt.expected.DropletID)
 			}
 			if got.Name != tt.expected.Name {
 				t.Errorf("Name = %q, want %q", got.Name, tt.expected.Name)
@@ -239,25 +199,15 @@ func TestDropletToInstance(t *testing.T) {
 			if got.Status != tt.expected.Status {
 				t.Errorf("Status = %q, want %q", got.Status, tt.expected.Status)
 			}
-			if got.PrivateIPv4 != tt.expected.PrivateIPv4 {
-				t.Errorf("PrivateIPv4 = %q, want %q", got.PrivateIPv4, tt.expected.PrivateIPv4)
-			}
-			if got.PublicIPv4 != tt.expected.PublicIPv4 {
-				t.Errorf("PublicIPv4 = %q, want %q", got.PublicIPv4, tt.expected.PublicIPv4)
-			}
-			if got.ImageID != tt.expected.ImageID {
-				t.Errorf("ImageID = %d, want %d", got.ImageID, tt.expected.ImageID)
-			}
-			if got.VPCUUID != tt.expected.VPCUUID {
-				t.Errorf("VPCUUID = %q, want %q", got.VPCUUID, tt.expected.VPCUUID)
-			}
 			if len(got.Tags) != len(tt.expected.Tags) {
 				t.Errorf("Tags length = %d, want %d", len(got.Tags), len(tt.expected.Tags))
 			}
+			if len(got.Labels) != len(tt.expected.Labels) {
+				t.Errorf("Labels length = %d, want %d", len(got.Labels), len(tt.expected.Labels))
+			}
+			if !got.CreatedAt.Equal(tt.expected.CreatedAt) {
+				t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, tt.expected.CreatedAt)
+			}
 		})
 	}
-}
-
-func strPtr(s string) *string {
-	return &s
 }

@@ -19,16 +19,13 @@ package cloudprovider
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/awslabs/operatorpkg/status"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/digitalocean/karpenter-provider-digitalocean/pkg/apis/v1alpha1"
-	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/image"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/instance"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/instancetype"
 
@@ -39,11 +36,11 @@ import (
 var _ cloudprovider.CloudProvider = (*CloudProvider)(nil)
 
 // CloudProvider implements the Karpenter CloudProvider interface for DigitalOcean.
+// It manages DOKS node pools (one per NodeClaim) for node provisioning.
 type CloudProvider struct {
 	kubeClient           client.Client
 	instanceProvider     instance.Provider
 	instanceTypeProvider instancetype.Provider
-	imageProvider        image.Provider
 }
 
 // New creates a new DigitalOcean CloudProvider.
@@ -51,17 +48,16 @@ func New(
 	kubeClient client.Client,
 	instanceProvider instance.Provider,
 	instanceTypeProvider instancetype.Provider,
-	imageProvider image.Provider,
 ) *CloudProvider {
 	return &CloudProvider{
 		kubeClient:           kubeClient,
 		instanceProvider:     instanceProvider,
 		instanceTypeProvider: instanceTypeProvider,
-		imageProvider:        imageProvider,
 	}
 }
 
-// Create launches a new DigitalOcean Droplet for the given NodeClaim.
+// Create launches a new DOKS node pool for the given NodeClaim.
+// Each NodeClaim maps to a single DOKS node pool with Count=1.
 func (c *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim) (*karpv1.NodeClaim, error) {
 	// 1. Resolve the DONodeClass from the nodeClassRef
 	nodeClass, err := c.resolveNodeClass(ctx, nodeClaim)
@@ -75,7 +71,7 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim)
 		return nil, fmt.Errorf("listing instance types: %w", err)
 	}
 
-	// 3. Create the droplet
+	// 3. Create the DOKS node pool
 	created, err := c.instanceProvider.Create(ctx, nodeClass, nodeClaim, instanceTypes)
 	if err != nil {
 		return nil, fmt.Errorf("creating instance: %w", err)
@@ -85,22 +81,36 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim)
 	return c.instanceToNodeClaim(created, nodeClaim), nil
 }
 
-// Delete terminates the DigitalOcean Droplet associated with the given NodeClaim.
+// Delete terminates the DOKS node pool associated with the given NodeClaim.
+// It reads the node pool ID from the NodeClaim annotation to perform an
+// efficient direct deletion.
 func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *karpv1.NodeClaim) error {
-	id, err := parseProviderID(nodeClaim.Status.ProviderID)
+	// Try to get the node pool ID from annotation first (most efficient)
+	if nodePoolID, ok := nodeClaim.Annotations[v1alpha1.AnnotationNodePoolID]; ok && nodePoolID != "" {
+		return c.instanceProvider.Delete(ctx, nodePoolID)
+	}
+
+	// Fallback: find the node pool by droplet ID
+	dropletID, err := parseProviderID(nodeClaim.Status.ProviderID)
 	if err != nil {
 		return fmt.Errorf("parsing provider ID: %w", err)
 	}
-	return c.instanceProvider.Delete(ctx, id)
+
+	inst, err := c.instanceProvider.Get(ctx, dropletID)
+	if err != nil {
+		return fmt.Errorf("getting instance for deletion: %w", err)
+	}
+
+	return c.instanceProvider.Delete(ctx, inst.NodePoolID)
 }
 
 // Get returns a NodeClaim for the given provider ID.
 func (c *CloudProvider) Get(ctx context.Context, providerID string) (*karpv1.NodeClaim, error) {
-	id, err := parseProviderID(providerID)
+	dropletID, err := parseProviderID(providerID)
 	if err != nil {
 		return nil, fmt.Errorf("parsing provider ID: %w", err)
 	}
-	inst, err := c.instanceProvider.Get(ctx, id)
+	inst, err := c.instanceProvider.Get(ctx, dropletID)
 	if err != nil {
 		return nil, fmt.Errorf("getting instance: %w", err)
 	}
@@ -147,9 +157,8 @@ func (c *CloudProvider) Name() string {
 
 // Drift reasons reported by the DigitalOcean cloud provider.
 const (
-	DriftReasonImageChanged  cloudprovider.DriftReason = "ImageChanged"
-	DriftReasonRegionChanged cloudprovider.DriftReason = "RegionChanged"
-	DriftReasonVPCChanged    cloudprovider.DriftReason = "VPCChanged"
+	DriftReasonRegionChanged   cloudprovider.DriftReason = "RegionChanged"
+	DriftReasonNodePoolChanged cloudprovider.DriftReason = "NodePoolChanged"
 )
 
 // IsDrifted checks if the given NodeClaim has drifted from its desired state.
@@ -161,30 +170,26 @@ func (c *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCla
 	}
 
 	// Parse provider ID to get the droplet
-	id, err := parseProviderID(nodeClaim.Status.ProviderID)
+	dropletID, err := parseProviderID(nodeClaim.Status.ProviderID)
 	if err != nil {
 		return "", fmt.Errorf("parsing provider ID for drift check: %w", err)
 	}
 
-	inst, err := c.instanceProvider.Get(ctx, id)
+	inst, err := c.instanceProvider.Get(ctx, dropletID)
 	if err != nil {
 		return "", fmt.Errorf("getting instance for drift check: %w", err)
 	}
 
-	// 1. Check image drift — if the DONodeClass has a resolved image ID
-	//    and the running instance uses a different image.
-	if nodeClass.Status.ImageID != 0 && inst.ImageID != nodeClass.Status.ImageID {
-		return DriftReasonImageChanged, nil
-	}
-
-	// 2. Check region drift — if the instance is not in the expected region.
+	// Check region drift — if the instance is not in the expected region.
 	if inst.Region != nodeClass.Spec.Region {
 		return DriftReasonRegionChanged, nil
 	}
 
-	// 3. Check VPC drift — if a VPC is specified and the instance is in a different VPC.
-	if nodeClass.Spec.VPCUUID != "" && inst.VPCUUID != nodeClass.Spec.VPCUUID {
-		return DriftReasonVPCChanged, nil
+	// Check size drift — if the node pool size doesn't match what the NodeClaim expects.
+	if expectedSize, ok := nodeClaim.Labels[v1.LabelInstanceTypeStable]; ok {
+		if inst.Size != expectedSize {
+			return DriftReasonNodePoolChanged, nil
+		}
 	}
 
 	return "", nil
@@ -209,17 +214,19 @@ func (c *CloudProvider) resolveNodeClassFromPool(ctx context.Context, nodePool *
 }
 
 // providerIDPrefix is the scheme used for DigitalOcean provider IDs.
+// DOKS sets the kubelet provider ID to "digitalocean://<dropletID>".
 const providerIDPrefix = "digitalocean://"
 
-// instanceToNodeClaim converts a DigitalOcean instance to a Karpenter NodeClaim.
+// instanceToNodeClaim converts a DigitalOcean DOKS instance to a Karpenter NodeClaim.
 func (c *CloudProvider) instanceToNodeClaim(inst *instance.Instance, existingClaim *karpv1.NodeClaim) *karpv1.NodeClaim {
 	nodeClaim := &karpv1.NodeClaim{}
 	if existingClaim != nil {
 		nodeClaim = existingClaim.DeepCopy()
 	}
 
-	// Set the provider ID
-	nodeClaim.Status.ProviderID = fmt.Sprintf("%s%s/%d", providerIDPrefix, inst.Region, inst.ID)
+	// Set the provider ID to match what the DOKS kubelet registers:
+	// digitalocean://<dropletID>
+	nodeClaim.Status.ProviderID = fmt.Sprintf("%s%s", providerIDPrefix, inst.DropletID)
 
 	// Set labels from the instance
 	if nodeClaim.Labels == nil {
@@ -229,45 +236,27 @@ func (c *CloudProvider) instanceToNodeClaim(inst *instance.Instance, existingCla
 	nodeClaim.Labels[v1.LabelInstanceTypeStable] = inst.Size
 	nodeClaim.Labels[v1alpha1.LabelInstanceSize] = inst.Size
 	nodeClaim.Labels[v1alpha1.LabelRegion] = inst.Region
-	if inst.ImageID != 0 {
-		nodeClaim.Labels[v1alpha1.LabelImageID] = strconv.Itoa(inst.ImageID)
-	}
-	if inst.VPCUUID != "" {
-		nodeClaim.Labels[v1alpha1.LabelVPCUUID] = inst.VPCUUID
-	}
 
-	// Set node name to the droplet name
+	// Set node name
 	nodeClaim.Status.NodeName = inst.Name
 
-	// Store IP addresses as annotations for reference
-	// (NodeClaimStatus does not have an Addresses field; actual node addresses
-	// are populated by the kubelet when the node registers.)
+	// Store node pool ID and droplet ID as annotations for efficient operations
 	if nodeClaim.Annotations == nil {
 		nodeClaim.Annotations = make(map[string]string)
 	}
-	if inst.PrivateIPv4 != "" {
-		nodeClaim.Annotations[v1alpha1.AnnotationPrivateIPv4] = inst.PrivateIPv4
-	}
-	if inst.PublicIPv4 != "" {
-		nodeClaim.Annotations[v1alpha1.AnnotationPublicIPv4] = inst.PublicIPv4
-	}
+	nodeClaim.Annotations[v1alpha1.AnnotationNodePoolID] = inst.NodePoolID
+	nodeClaim.Annotations[v1alpha1.AnnotationDropletID] = inst.DropletID
 
-	// Set capacity from the instance size
-	// This will be populated with real values once the node registers
+	// Set capacity (will be populated with real values once the node registers)
 	if nodeClaim.Status.Capacity == nil {
 		nodeClaim.Status.Capacity = v1.ResourceList{}
-	}
-
-	// Populate creation timestamp from the instance if not already set
-	if nodeClaim.CreationTimestamp.IsZero() && !inst.CreatedAt.IsZero() {
-		nodeClaim.CreationTimestamp = metav1.NewTime(inst.CreatedAt)
 	}
 
 	return nodeClaim
 }
 
 // parseProviderID extracts the droplet ID from a provider ID string.
-// Format: digitalocean://<region>/<droplet-id>
+// DOKS uses the format: digitalocean://<dropletID>
 func parseProviderID(providerID string) (string, error) {
 	if providerID == "" {
 		return "", fmt.Errorf("provider ID is empty")
@@ -277,17 +266,11 @@ func parseProviderID(providerID string) (string, error) {
 		return "", fmt.Errorf("provider ID %q does not have expected prefix %q", providerID, providerIDPrefix)
 	}
 
-	// Remove the prefix: "<region>/<droplet-id>"
-	remainder := strings.TrimPrefix(providerID, providerIDPrefix)
-	parts := strings.SplitN(remainder, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("provider ID %q is malformed, expected format: %s<region>/<droplet-id>", providerID, providerIDPrefix)
+	// Remove the prefix to get the droplet ID
+	dropletID := strings.TrimPrefix(providerID, providerIDPrefix)
+	if dropletID == "" {
+		return "", fmt.Errorf("provider ID %q has empty droplet ID", providerID)
 	}
 
-	// Validate that the droplet ID is numeric
-	if _, err := strconv.Atoi(parts[1]); err != nil {
-		return "", fmt.Errorf("provider ID %q has non-numeric droplet ID %q: %w", providerID, parts[1], err)
-	}
-
-	return parts[1], nil
+	return dropletID, nil
 }

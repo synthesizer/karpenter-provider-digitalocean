@@ -19,7 +19,6 @@ package cloudprovider
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -48,21 +47,21 @@ func TestParseProviderID(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name:       "valid provider ID",
-			providerID: "digitalocean://nyc1/12345",
+			name:       "valid provider ID - numeric",
+			providerID: "digitalocean://12345",
 			wantID:     "12345",
 			wantErr:    false,
 		},
 		{
-			name:       "valid provider ID different region",
-			providerID: "digitalocean://sfo3/67890",
-			wantID:     "67890",
+			name:       "valid provider ID - large number",
+			providerID: "digitalocean://999999999",
+			wantID:     "999999999",
 			wantErr:    false,
 		},
 		{
-			name:       "valid provider ID large droplet ID",
-			providerID: "digitalocean://ams3/999999999",
-			wantID:     "999999999",
+			name:       "valid provider ID - another number",
+			providerID: "digitalocean://67890",
+			wantID:     "67890",
 			wantErr:    false,
 		},
 		{
@@ -74,30 +73,6 @@ func TestParseProviderID(t *testing.T) {
 		{
 			name:       "missing prefix",
 			providerID: "aws://us-east-1/i-12345",
-			wantID:     "",
-			wantErr:    true,
-		},
-		{
-			name:       "malformed - no region",
-			providerID: "digitalocean://12345",
-			wantID:     "",
-			wantErr:    true,
-		},
-		{
-			name:       "malformed - empty region",
-			providerID: "digitalocean:///12345",
-			wantID:     "",
-			wantErr:    true,
-		},
-		{
-			name:       "malformed - empty ID",
-			providerID: "digitalocean://nyc1/",
-			wantID:     "",
-			wantErr:    true,
-		},
-		{
-			name:       "malformed - non-numeric ID",
-			providerID: "digitalocean://nyc1/abc",
 			wantID:     "",
 			wantErr:    true,
 		},
@@ -129,31 +104,29 @@ func TestInstanceToNodeClaimProviderID(t *testing.T) {
 	cp := &CloudProvider{}
 
 	tests := []struct {
-		name    string
-		region  string
-		id      int
-		wantPID string
+		name      string
+		dropletID string
+		wantPID   string
 	}{
 		{
-			name:    "nyc1 region",
-			region:  "nyc1",
-			id:      12345,
-			wantPID: "digitalocean://nyc1/12345",
+			name:      "numeric droplet ID",
+			dropletID: "12345",
+			wantPID:   "digitalocean://12345",
 		},
 		{
-			name:    "sfo3 region",
-			region:  "sfo3",
-			id:      67890,
-			wantPID: "digitalocean://sfo3/67890",
+			name:      "large droplet ID",
+			dropletID: "999999999",
+			wantPID:   "digitalocean://999999999",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			inst := &instance.Instance{
-				ID:     tt.id,
-				Region: tt.region,
-				Size:   "s-1vcpu-1gb",
+				NodePoolID: "np-1",
+				DropletID:  tt.dropletID,
+				Region:     "nyc1",
+				Size:       "s-1vcpu-1gb",
 			}
 			nc := cp.instanceToNodeClaim(inst, nil)
 			if nc.Status.ProviderID != tt.wantPID {
@@ -167,11 +140,10 @@ func TestInstanceToNodeClaimLabels(t *testing.T) {
 	cp := &CloudProvider{}
 
 	inst := &instance.Instance{
-		ID:      12345,
-		Region:  "nyc1",
-		Size:    "s-2vcpu-4gb",
-		ImageID: 99999,
-		VPCUUID: "vpc-abc-123",
+		NodePoolID: "np-abc",
+		DropletID:  "12345",
+		Region:     "nyc1",
+		Size:       "s-2vcpu-4gb",
 	}
 
 	nc := cp.instanceToNodeClaim(inst, nil)
@@ -191,70 +163,28 @@ func TestInstanceToNodeClaimLabels(t *testing.T) {
 	if got := nc.Labels[v1alpha1.LabelRegion]; got != "nyc1" {
 		t.Errorf("expected region label %q, got %q", "nyc1", got)
 	}
-	if got := nc.Labels[v1alpha1.LabelImageID]; got != "99999" {
-		t.Errorf("expected image ID label %q, got %q", "99999", got)
-	}
-	if got := nc.Labels[v1alpha1.LabelVPCUUID]; got != "vpc-abc-123" {
-		t.Errorf("expected VPC UUID label %q, got %q", "vpc-abc-123", got)
-	}
 }
 
-func TestInstanceToNodeClaimAddresses(t *testing.T) {
+func TestInstanceToNodeClaimAnnotations(t *testing.T) {
 	cp := &CloudProvider{}
 
-	tests := []struct {
-		name          string
-		inst          *instance.Instance
-		wantPrivateIP string
-		wantPublicIP  string
-	}{
-		{
-			name: "both private and public IPs",
-			inst: &instance.Instance{
-				ID:          1,
-				Region:      "nyc1",
-				Size:        "s-1vcpu-1gb",
-				PrivateIPv4: "10.0.0.2",
-				PublicIPv4:  "1.2.3.4",
-			},
-			wantPrivateIP: "10.0.0.2",
-			wantPublicIP:  "1.2.3.4",
-		},
-		{
-			name: "private IP only",
-			inst: &instance.Instance{
-				ID:          2,
-				Region:      "nyc1",
-				Size:        "s-1vcpu-1gb",
-				PrivateIPv4: "10.0.0.2",
-			},
-			wantPrivateIP: "10.0.0.2",
-		},
-		{
-			name: "no IPs",
-			inst: &instance.Instance{
-				ID:     3,
-				Region: "nyc1",
-				Size:   "s-1vcpu-1gb",
-			},
-		},
+	inst := &instance.Instance{
+		NodePoolID: "np-abc-123",
+		DropletID:  "67890",
+		Name:       "test-node",
+		Region:     "sfo3",
+		Size:       "s-2vcpu-4gb",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			nc := cp.instanceToNodeClaim(tt.inst, nil)
-			if nc.Status.ProviderID == "" {
-				t.Error("expected non-empty provider ID")
-			}
-			gotPrivate := nc.Annotations[v1alpha1.AnnotationPrivateIPv4]
-			if gotPrivate != tt.wantPrivateIP {
-				t.Errorf("private IP annotation = %q, want %q", gotPrivate, tt.wantPrivateIP)
-			}
-			gotPublic := nc.Annotations[v1alpha1.AnnotationPublicIPv4]
-			if gotPublic != tt.wantPublicIP {
-				t.Errorf("public IP annotation = %q, want %q", gotPublic, tt.wantPublicIP)
-			}
-		})
+	nc := cp.instanceToNodeClaim(inst, nil)
+
+	// Verify node pool ID annotation
+	if got := nc.Annotations[v1alpha1.AnnotationNodePoolID]; got != "np-abc-123" {
+		t.Errorf("expected node pool ID annotation %q, got %q", "np-abc-123", got)
+	}
+	// Verify droplet ID annotation
+	if got := nc.Annotations[v1alpha1.AnnotationDropletID]; got != "67890" {
+		t.Errorf("expected droplet ID annotation %q, got %q", "67890", got)
 	}
 }
 
@@ -270,11 +200,11 @@ func TestInstanceToNodeClaimWithExistingClaim(t *testing.T) {
 	}
 
 	inst := &instance.Instance{
-		ID:          12345,
-		Name:        "new-node",
-		Region:      "nyc1",
-		Size:        "s-2vcpu-4gb",
-		PrivateIPv4: "10.0.0.2",
+		NodePoolID: "np-1",
+		DropletID:  "12345",
+		Name:       "new-node",
+		Region:     "nyc1",
+		Size:       "s-2vcpu-4gb",
 	}
 
 	nc := cp.instanceToNodeClaim(inst, existing)
@@ -295,28 +225,6 @@ func TestInstanceToNodeClaimWithExistingClaim(t *testing.T) {
 	// Ensure original is not modified (deep copy)
 	if existing.Status.ProviderID != "" {
 		t.Error("original claim should not be modified")
-	}
-}
-
-func TestInstanceToNodeClaimMissingOptionalFields(t *testing.T) {
-	cp := &CloudProvider{}
-
-	inst := &instance.Instance{
-		ID:     12345,
-		Region: "nyc1",
-		Size:   "s-1vcpu-1gb",
-		// No ImageID, no VPCUUID
-	}
-
-	nc := cp.instanceToNodeClaim(inst, nil)
-
-	// ImageID label should not be present when ImageID is 0
-	if _, ok := nc.Labels[v1alpha1.LabelImageID]; ok {
-		t.Error("ImageID label should not be set when ImageID is 0")
-	}
-	// VPCUUID label should not be present when empty
-	if _, ok := nc.Labels[v1alpha1.LabelVPCUUID]; ok {
-		t.Error("VPCUUID label should not be set when empty")
 	}
 }
 
@@ -371,10 +279,6 @@ func TestCloudProviderCreate(t *testing.T) {
 		},
 		Spec: v1alpha1.DONodeClassSpec{
 			Region: "nyc1",
-			Image:  v1alpha1.DONodeClassImage{ID: 12345},
-		},
-		Status: v1alpha1.DONodeClassStatus{
-			ImageID: 12345,
 		},
 	}
 
@@ -390,9 +294,8 @@ func TestCloudProviderCreate(t *testing.T) {
 			newTestInstanceType("s-2vcpu-4gb", "nyc1", "sfo3"),
 		},
 	}
-	imageProvider := fakeproviders.NewImageProvider()
 
-	cp := New(kubeClient, instanceProvider, instanceTypeProvider, imageProvider)
+	cp := New(kubeClient, instanceProvider, instanceTypeProvider)
 
 	nodeClaim := &karpv1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -412,7 +315,7 @@ func TestCloudProviderCreate(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	// Verify provider ID format
+	// Verify provider ID format (digitalocean://<dropletID>)
 	if result.Status.ProviderID == "" {
 		t.Error("expected non-empty provider ID")
 	}
@@ -420,6 +323,11 @@ func TestCloudProviderCreate(t *testing.T) {
 	// Verify the instance was created in the fake
 	if instanceProvider.CreateCalls != 1 {
 		t.Errorf("expected 1 create call, got %d", instanceProvider.CreateCalls)
+	}
+
+	// Verify annotations contain node pool ID
+	if result.Annotations[v1alpha1.AnnotationNodePoolID] == "" {
+		t.Error("expected non-empty node pool ID annotation")
 	}
 }
 
@@ -433,9 +341,8 @@ func TestCloudProviderCreateMissingNodeClass(t *testing.T) {
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
 	instanceTypeProvider := &fakeproviders.InstanceTypeProvider{}
-	imageProvider := fakeproviders.NewImageProvider()
 
-	cp := New(kubeClient, instanceProvider, instanceTypeProvider, imageProvider)
+	cp := New(kubeClient, instanceProvider, instanceTypeProvider)
 
 	nodeClaim := &karpv1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -465,7 +372,6 @@ func TestCloudProviderCreateInstanceProviderError(t *testing.T) {
 		},
 		Spec: v1alpha1.DONodeClassSpec{
 			Region: "nyc1",
-			Image:  v1alpha1.DONodeClassImage{ID: 12345},
 		},
 	}
 
@@ -482,9 +388,8 @@ func TestCloudProviderCreateInstanceProviderError(t *testing.T) {
 			newTestInstanceType("s-2vcpu-4gb", "nyc1"),
 		},
 	}
-	imageProvider := fakeproviders.NewImageProvider()
 
-	cp := New(kubeClient, instanceProvider, instanceTypeProvider, imageProvider)
+	cp := New(kubeClient, instanceProvider, instanceTypeProvider)
 
 	nodeClaim := &karpv1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim"},
@@ -505,19 +410,28 @@ func TestCloudProviderCreateInstanceProviderError(t *testing.T) {
 
 // --- CloudProvider.Delete Tests ---
 
-func TestCloudProviderDelete(t *testing.T) {
+func TestCloudProviderDeleteWithAnnotation(t *testing.T) {
 	ctx := context.Background()
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
-	instanceProvider.Instances[12345] = &instance.Instance{
-		ID: 12345, Region: "nyc1", Size: "s-1vcpu-1gb",
+	instanceProvider.NodePools["nodepool-1"] = &instance.Instance{
+		NodePoolID: "nodepool-1",
+		DropletID:  "12345",
+		Region:     "nyc1",
+		Size:       "s-1vcpu-1gb",
 	}
 
-	cp := New(nil, instanceProvider, nil, nil)
+	cp := New(nil, instanceProvider, nil)
 
+	// Delete using the AnnotationNodePoolID (preferred path)
 	nodeClaim := &karpv1.NodeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				v1alpha1.AnnotationNodePoolID: "nodepool-1",
+			},
+		},
 		Status: karpv1.NodeClaimStatus{
-			ProviderID: "digitalocean://nyc1/12345",
+			ProviderID: "digitalocean://12345",
 		},
 	}
 
@@ -529,14 +443,47 @@ func TestCloudProviderDelete(t *testing.T) {
 	if instanceProvider.DeleteCalls != 1 {
 		t.Errorf("expected 1 delete call, got %d", instanceProvider.DeleteCalls)
 	}
-	if len(instanceProvider.Instances) != 0 {
-		t.Errorf("expected 0 instances after delete, got %d", len(instanceProvider.Instances))
+	if len(instanceProvider.NodePools) != 0 {
+		t.Errorf("expected 0 node pools after delete, got %d", len(instanceProvider.NodePools))
+	}
+}
+
+func TestCloudProviderDeleteFallbackToProviderID(t *testing.T) {
+	ctx := context.Background()
+
+	instanceProvider := fakeproviders.NewInstanceProvider()
+	instanceProvider.NodePools["nodepool-1"] = &instance.Instance{
+		NodePoolID: "nodepool-1",
+		DropletID:  "12345",
+		Region:     "nyc1",
+		Size:       "s-1vcpu-1gb",
+	}
+
+	cp := New(nil, instanceProvider, nil)
+
+	// Delete using just the provider ID (fallback path: parse → Get → Delete)
+	nodeClaim := &karpv1.NodeClaim{
+		Status: karpv1.NodeClaimStatus{
+			ProviderID: "digitalocean://12345",
+		},
+	}
+
+	err := cp.Delete(ctx, nodeClaim)
+	if err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	if instanceProvider.DeleteCalls != 1 {
+		t.Errorf("expected 1 delete call, got %d", instanceProvider.DeleteCalls)
+	}
+	if len(instanceProvider.NodePools) != 0 {
+		t.Errorf("expected 0 node pools after delete, got %d", len(instanceProvider.NodePools))
 	}
 }
 
 func TestCloudProviderDeleteInvalidProviderID(t *testing.T) {
 	ctx := context.Background()
-	cp := New(nil, fakeproviders.NewInstanceProvider(), nil, nil)
+	cp := New(nil, fakeproviders.NewInstanceProvider(), nil)
 
 	nodeClaim := &karpv1.NodeClaim{
 		Status: karpv1.NodeClaimStatus{
@@ -552,7 +499,7 @@ func TestCloudProviderDeleteInvalidProviderID(t *testing.T) {
 
 func TestCloudProviderDeleteEmptyProviderID(t *testing.T) {
 	ctx := context.Background()
-	cp := New(nil, fakeproviders.NewInstanceProvider(), nil, nil)
+	cp := New(nil, fakeproviders.NewInstanceProvider(), nil)
 
 	nodeClaim := &karpv1.NodeClaim{
 		Status: karpv1.NodeClaimStatus{
@@ -572,28 +519,30 @@ func TestCloudProviderGet(t *testing.T) {
 	ctx := context.Background()
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
-	instanceProvider.Instances[12345] = &instance.Instance{
-		ID:          12345,
-		Name:        "test-node",
-		Region:      "nyc1",
-		Size:        "s-2vcpu-4gb",
-		PrivateIPv4: "10.0.0.2",
-		ImageID:     99999,
+	instanceProvider.NodePools["nodepool-1"] = &instance.Instance{
+		NodePoolID: "nodepool-1",
+		DropletID:  "12345",
+		Name:       "test-node",
+		Region:     "nyc1",
+		Size:       "s-2vcpu-4gb",
 	}
 
-	cp := New(nil, instanceProvider, nil, nil)
+	cp := New(nil, instanceProvider, nil)
 
-	nc, err := cp.Get(ctx, "digitalocean://nyc1/12345")
+	nc, err := cp.Get(ctx, "digitalocean://12345")
 	if err != nil {
 		t.Fatalf("Get() unexpected error: %v", err)
 	}
 
-	expectedPID := "digitalocean://nyc1/12345"
+	expectedPID := "digitalocean://12345"
 	if nc.Status.ProviderID != expectedPID {
 		t.Errorf("expected provider ID %q, got %q", expectedPID, nc.Status.ProviderID)
 	}
 	if nc.Labels[v1.LabelInstanceTypeStable] != "s-2vcpu-4gb" {
 		t.Errorf("expected instance type label %q, got %q", "s-2vcpu-4gb", nc.Labels[v1.LabelInstanceTypeStable])
+	}
+	if nc.Annotations[v1alpha1.AnnotationNodePoolID] != "nodepool-1" {
+		t.Errorf("expected node pool ID annotation %q, got %q", "nodepool-1", nc.Annotations[v1alpha1.AnnotationNodePoolID])
 	}
 }
 
@@ -601,9 +550,9 @@ func TestCloudProviderGetNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
-	cp := New(nil, instanceProvider, nil, nil)
+	cp := New(nil, instanceProvider, nil)
 
-	_, err := cp.Get(ctx, "digitalocean://nyc1/99999")
+	_, err := cp.Get(ctx, "digitalocean://99999")
 	if err == nil {
 		t.Fatal("expected error for non-existent instance")
 	}
@@ -615,17 +564,17 @@ func TestCloudProviderList(t *testing.T) {
 	ctx := context.Background()
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
-	instanceProvider.Instances[100] = &instance.Instance{
-		ID: 100, Region: "nyc1", Size: "s-1vcpu-1gb",
+	instanceProvider.NodePools["np-1"] = &instance.Instance{
+		NodePoolID: "np-1", DropletID: "100", Region: "nyc1", Size: "s-1vcpu-1gb",
 	}
-	instanceProvider.Instances[200] = &instance.Instance{
-		ID: 200, Region: "sfo3", Size: "s-2vcpu-4gb",
+	instanceProvider.NodePools["np-2"] = &instance.Instance{
+		NodePoolID: "np-2", DropletID: "200", Region: "sfo3", Size: "s-2vcpu-4gb",
 	}
-	instanceProvider.Instances[300] = &instance.Instance{
-		ID: 300, Region: "ams3", Size: "g-2vcpu-8gb",
+	instanceProvider.NodePools["np-3"] = &instance.Instance{
+		NodePoolID: "np-3", DropletID: "300", Region: "ams3", Size: "g-2vcpu-8gb",
 	}
 
-	cp := New(nil, instanceProvider, nil, nil)
+	cp := New(nil, instanceProvider, nil)
 
 	claims, err := cp.List(ctx)
 	if err != nil {
@@ -641,7 +590,7 @@ func TestCloudProviderListEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
-	cp := New(nil, instanceProvider, nil, nil)
+	cp := New(nil, instanceProvider, nil)
 
 	claims, err := cp.List(ctx)
 	if err != nil {
@@ -658,7 +607,7 @@ func TestCloudProviderListError(t *testing.T) {
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
 	instanceProvider.ListError = fmt.Errorf("API error")
-	cp := New(nil, instanceProvider, nil, nil)
+	cp := New(nil, instanceProvider, nil)
 
 	_, err := cp.List(ctx)
 	if err == nil {
@@ -677,7 +626,6 @@ func TestCloudProviderGetInstanceTypes(t *testing.T) {
 		},
 		Spec: v1alpha1.DONodeClassSpec{
 			Region: "nyc1",
-			Image:  v1alpha1.DONodeClassImage{ID: 12345},
 		},
 	}
 
@@ -695,7 +643,7 @@ func TestCloudProviderGetInstanceTypes(t *testing.T) {
 		InstanceTypes: expectedTypes,
 	}
 
-	cp := New(kubeClient, nil, instanceTypeProvider, nil)
+	cp := New(kubeClient, nil, instanceTypeProvider)
 
 	nodePool := &karpv1.NodePool{
 		Spec: karpv1.NodePoolSpec{
@@ -730,6 +678,7 @@ func TestCloudProviderIsDrifted(t *testing.T) {
 		name      string
 		nodeClass *v1alpha1.DONodeClass
 		instance  *instance.Instance
+		labels    map[string]string // extra labels on the NodeClaim
 		wantDrift cloudprovider.DriftReason
 		wantErr   bool
 	}{
@@ -738,38 +687,19 @@ func TestCloudProviderIsDrifted(t *testing.T) {
 			nodeClass: &v1alpha1.DONodeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-class"},
 				Spec: v1alpha1.DONodeClassSpec{
-					Region:  "nyc1",
-					VPCUUID: "vpc-123",
-					Image:   v1alpha1.DONodeClassImage{ID: 12345},
+					Region: "nyc1",
 				},
-				Status: v1alpha1.DONodeClassStatus{ImageID: 99999},
 			},
 			instance: &instance.Instance{
-				ID:      12345,
-				Region:  "nyc1",
-				Size:    "s-2vcpu-4gb",
-				ImageID: 99999,
-				VPCUUID: "vpc-123",
+				NodePoolID: "np-1",
+				DropletID:  "12345",
+				Region:     "nyc1",
+				Size:       "s-2vcpu-4gb",
+			},
+			labels: map[string]string{
+				v1.LabelInstanceTypeStable: "s-2vcpu-4gb",
 			},
 			wantDrift: "",
-		},
-		{
-			name: "image drift",
-			nodeClass: &v1alpha1.DONodeClass{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-class"},
-				Spec: v1alpha1.DONodeClassSpec{
-					Region: "nyc1",
-					Image:  v1alpha1.DONodeClassImage{ID: 12345},
-				},
-				Status: v1alpha1.DONodeClassStatus{ImageID: 99999},
-			},
-			instance: &instance.Instance{
-				ID:      12345,
-				Region:  "nyc1",
-				Size:    "s-2vcpu-4gb",
-				ImageID: 88888, // Different from nodeClass.Status.ImageID
-			},
-			wantDrift: DriftReasonImageChanged,
 		},
 		{
 			name: "region drift",
@@ -777,70 +707,50 @@ func TestCloudProviderIsDrifted(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "test-class"},
 				Spec: v1alpha1.DONodeClassSpec{
 					Region: "nyc1",
-					Image:  v1alpha1.DONodeClassImage{ID: 12345},
 				},
 			},
 			instance: &instance.Instance{
-				ID:     12345,
-				Region: "sfo3", // Different from nodeClass.Spec.Region
-				Size:   "s-2vcpu-4gb",
+				NodePoolID: "np-1",
+				DropletID:  "12345",
+				Region:     "sfo3", // Different from nodeClass.Spec.Region
+				Size:       "s-2vcpu-4gb",
 			},
 			wantDrift: DriftReasonRegionChanged,
 		},
 		{
-			name: "VPC drift",
-			nodeClass: &v1alpha1.DONodeClass{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-class"},
-				Spec: v1alpha1.DONodeClassSpec{
-					Region:  "nyc1",
-					VPCUUID: "vpc-123",
-					Image:   v1alpha1.DONodeClassImage{ID: 12345},
-				},
-			},
-			instance: &instance.Instance{
-				ID:      12345,
-				Region:  "nyc1",
-				Size:    "s-2vcpu-4gb",
-				VPCUUID: "vpc-999", // Different from nodeClass.Spec.VPCUUID
-			},
-			wantDrift: DriftReasonVPCChanged,
-		},
-		{
-			name: "no drift with empty VPC spec",
+			name: "node pool size drift",
 			nodeClass: &v1alpha1.DONodeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-class"},
 				Spec: v1alpha1.DONodeClassSpec{
 					Region: "nyc1",
-					Image:  v1alpha1.DONodeClassImage{ID: 12345},
-					// No VPCUUID specified
 				},
 			},
 			instance: &instance.Instance{
-				ID:      12345,
-				Region:  "nyc1",
-				Size:    "s-2vcpu-4gb",
-				VPCUUID: "vpc-whatever",
+				NodePoolID: "np-1",
+				DropletID:  "12345",
+				Region:     "nyc1",
+				Size:       "s-4vcpu-8gb", // Different from NodeClaim label
 			},
-			wantDrift: "",
+			labels: map[string]string{
+				v1.LabelInstanceTypeStable: "s-2vcpu-4gb",
+			},
+			wantDrift: DriftReasonNodePoolChanged,
 		},
 		{
-			name: "no drift when imageID is zero in status",
+			name: "no drift when no instance type label on claim",
 			nodeClass: &v1alpha1.DONodeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-class"},
 				Spec: v1alpha1.DONodeClassSpec{
 					Region: "nyc1",
-					Image:  v1alpha1.DONodeClassImage{Slug: "ubuntu-24-04-x64"},
-				},
-				Status: v1alpha1.DONodeClassStatus{
-					ImageID: 0, // Not resolved yet
 				},
 			},
 			instance: &instance.Instance{
-				ID:      12345,
-				Region:  "nyc1",
-				Size:    "s-2vcpu-4gb",
-				ImageID: 99999,
+				NodePoolID: "np-1",
+				DropletID:  "12345",
+				Region:     "nyc1",
+				Size:       "s-4vcpu-8gb",
 			},
+			// No labels → no size check → no drift
 			wantDrift: "",
 		},
 	}
@@ -854,11 +764,14 @@ func TestCloudProviderIsDrifted(t *testing.T) {
 				Build()
 
 			instanceProvider := fakeproviders.NewInstanceProvider()
-			instanceProvider.Instances[tt.instance.ID] = tt.instance
+			instanceProvider.NodePools["np-1"] = tt.instance
 
-			cp := New(kubeClient, instanceProvider, nil, nil)
+			cp := New(kubeClient, instanceProvider, nil)
 
 			nodeClaim := &karpv1.NodeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: tt.labels,
+				},
 				Spec: karpv1.NodeClaimSpec{
 					NodeClassRef: &karpv1.NodeClassReference{
 						Name:  tt.nodeClass.Name,
@@ -867,7 +780,7 @@ func TestCloudProviderIsDrifted(t *testing.T) {
 					},
 				},
 				Status: karpv1.NodeClaimStatus{
-					ProviderID: fmt.Sprintf("digitalocean://%s/%d", tt.instance.Region, tt.instance.ID),
+					ProviderID: fmt.Sprintf("digitalocean://%s", tt.instance.DropletID),
 				},
 			}
 
@@ -921,9 +834,7 @@ func TestCloudProviderCreateGetDeleteRoundtrip(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-class"},
 		Spec: v1alpha1.DONodeClassSpec{
 			Region: "nyc1",
-			Image:  v1alpha1.DONodeClassImage{ID: 12345},
 		},
-		Status: v1alpha1.DONodeClassStatus{ImageID: 12345},
 	}
 
 	scheme := newTestScheme()
@@ -938,9 +849,8 @@ func TestCloudProviderCreateGetDeleteRoundtrip(t *testing.T) {
 			newTestInstanceType("s-2vcpu-4gb", "nyc1"),
 		},
 	}
-	imageProvider := fakeproviders.NewImageProvider()
 
-	cp := New(kubeClient, instanceProvider, instanceTypeProvider, imageProvider)
+	cp := New(kubeClient, instanceProvider, instanceTypeProvider)
 
 	// 1. Create
 	nodeClaim := &karpv1.NodeClaim{
@@ -957,6 +867,12 @@ func TestCloudProviderCreateGetDeleteRoundtrip(t *testing.T) {
 	created, err := cp.Create(ctx, nodeClaim)
 	if err != nil {
 		t.Fatalf("Create() error: %v", err)
+	}
+
+	// Verify annotations were set
+	nodePoolID := created.Annotations[v1alpha1.AnnotationNodePoolID]
+	if nodePoolID == "" {
+		t.Fatal("expected non-empty node pool ID annotation after create")
 	}
 
 	// 2. Get
@@ -977,8 +893,13 @@ func TestCloudProviderCreateGetDeleteRoundtrip(t *testing.T) {
 		t.Errorf("expected 1 listed, got %d", len(listed))
 	}
 
-	// 4. Delete
+	// 4. Delete using annotation (preferred path)
 	deleteNC := &karpv1.NodeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				v1alpha1.AnnotationNodePoolID: nodePoolID,
+			},
+		},
 		Status: karpv1.NodeClaimStatus{
 			ProviderID: created.Status.ProviderID,
 		},
@@ -1001,15 +922,15 @@ func TestCloudProviderCreateGetDeleteRoundtrip(t *testing.T) {
 // --- Provider ID parsing stress test ---
 
 func TestParseProviderIDStress(t *testing.T) {
-	// Test with very large droplet IDs
-	for _, id := range []int{1, 999999999, 2147483647} {
-		providerID := fmt.Sprintf("digitalocean://nyc1/%d", id)
+	// Test with various droplet ID formats
+	for _, id := range []string{"1", "999999999", "2147483647", "100000"} {
+		providerID := fmt.Sprintf("digitalocean://%s", id)
 		gotID, err := parseProviderID(providerID)
 		if err != nil {
 			t.Errorf("parseProviderID(%q) unexpected error: %v", providerID, err)
 		}
-		if gotID != strconv.Itoa(id) {
-			t.Errorf("parseProviderID(%q) = %q, want %q", providerID, gotID, strconv.Itoa(id))
+		if gotID != id {
+			t.Errorf("parseProviderID(%q) = %q, want %q", providerID, gotID, id)
 		}
 	}
 }

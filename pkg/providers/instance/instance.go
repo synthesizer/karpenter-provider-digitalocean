@@ -19,7 +19,7 @@ package instance
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"time"
 
 	"github.com/digitalocean/godo"
 
@@ -29,160 +29,216 @@ import (
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
 
-// Provider manages the lifecycle of DigitalOcean Droplets for Karpenter.
+// Provider manages the lifecycle of DOKS node pools for Karpenter.
+// Each Karpenter NodeClaim maps to a single DOKS node pool with Count=1,
+// allowing individual control over node size and clean deletion semantics.
 type Provider interface {
-	// Create launches a new Droplet based on the NodeClaim and DONodeClass specs.
+	// Create creates a new DOKS node pool with Count=1 based on the NodeClaim
+	// and DONodeClass specs. It waits for the node to be provisioned and returns
+	// the instance details including the underlying droplet ID.
 	Create(ctx context.Context, nodeClass *v1alpha1.DONodeClass, nodeClaim *karpv1.NodeClaim, instanceTypes []*cloudprovider.InstanceType) (*Instance, error)
 
-	// Delete terminates a Droplet by its ID.
-	Delete(ctx context.Context, id string) error
+	// Delete removes a DOKS node pool by its node pool ID.
+	Delete(ctx context.Context, nodePoolID string) error
 
-	// Get retrieves a Droplet by its ID.
-	Get(ctx context.Context, id string) (*Instance, error)
+	// Get retrieves an instance by its droplet ID by searching all Karpenter-managed
+	// DOKS node pools in the cluster.
+	Get(ctx context.Context, dropletID string) (*Instance, error)
 
-	// List returns all Karpenter-managed Droplets.
+	// List returns all Karpenter-managed instances from DOKS node pools.
 	List(ctx context.Context) ([]*Instance, error)
 }
 
-// DefaultProvider implements the instance Provider using the DigitalOcean API.
+// DefaultProvider implements the instance Provider using the DOKS Node Pool API.
 type DefaultProvider struct {
 	doClient    *godo.Client
+	clusterID   string
 	clusterName string
+	region      string
 }
 
-// NewDefaultProvider creates a new instance provider.
-func NewDefaultProvider(doClient *godo.Client, clusterName string) *DefaultProvider {
+// NewDefaultProvider creates a new instance provider backed by the DOKS Node Pool API.
+func NewDefaultProvider(doClient *godo.Client, clusterID, clusterName, region string) *DefaultProvider {
 	return &DefaultProvider{
 		doClient:    doClient,
+		clusterID:   clusterID,
 		clusterName: clusterName,
+		region:      region,
 	}
 }
 
-// Create launches a new DigitalOcean Droplet.
+// Create creates a new DOKS node pool with Count=1 for the given NodeClaim.
+// It polls until the node pool has a provisioned node with a droplet ID,
+// then returns the instance details.
 func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1alpha1.DONodeClass, nodeClaim *karpv1.NodeClaim, instanceTypes []*cloudprovider.InstanceType) (*Instance, error) {
 	if len(instanceTypes) == 0 {
 		return nil, fmt.Errorf("no instance types provided")
 	}
 
-	// Select the best instance type based on requirements
+	// Select the first (cheapest/best-fit) instance type
 	// TODO: Implement proper instance type selection (cheapest that fits)
 	selectedType := instanceTypes[0]
 
-	// Build tags
+	// Build tags for the node pool
 	tags := []string{
 		v1alpha1.TagManagedBy,
 		v1alpha1.TagClusterPrefix + p.clusterName,
 	}
 	tags = append(tags, nodeClass.Spec.Tags...)
 
-	// Resolve image
-	imageID := nodeClass.Status.ImageID
-	if imageID == 0 && nodeClass.Spec.Image.ID != 0 {
-		imageID = nodeClass.Spec.Image.ID
+	// Build labels for the node pool (propagated to Kubernetes nodes)
+	labels := map[string]string{
+		v1alpha1.LabelInstanceSize: selectedType.Name,
+		v1alpha1.LabelRegion:       p.region,
 	}
 
-	// Build the create request
-	createReq := &godo.DropletCreateRequest{
-		Name:   nodeClaim.Name,
-		Region: nodeClass.Spec.Region,
+	// Generate a unique node pool name
+	// DOKS node pool names must be <= 255 chars, alphanumeric + hyphens
+	nodePoolName := fmt.Sprintf("karp-%s", nodeClaim.Name)
+	if len(nodePoolName) > 255 {
+		nodePoolName = nodePoolName[:255]
+	}
+
+	// Create the DOKS node pool with Count=1
+	createReq := &godo.KubernetesNodePoolCreateRequest{
+		Name:   nodePoolName,
 		Size:   selectedType.Name,
-		Image: godo.DropletCreateImage{
-			ID: imageID,
-		},
-		Tags:     tags,
-		VPCUUID:  nodeClass.Spec.VPCUUID,
-		UserData: derefString(nodeClass.Spec.UserData),
+		Count:  1,
+		Tags:   tags,
+		Labels: labels,
 	}
 
-	// Add SSH keys
-	for _, key := range nodeClass.Spec.SSHKeys {
-		createReq.SSHKeys = append(createReq.SSHKeys, godo.DropletCreateSSHKey{
-			Fingerprint: key,
-		})
-	}
-
-	// Create the droplet
-	droplet, _, err := p.doClient.Droplets.Create(ctx, createReq)
+	nodePool, _, err := p.doClient.Kubernetes.CreateNodePool(ctx, p.clusterID, createReq)
 	if err != nil {
-		return nil, fmt.Errorf("creating droplet: %w", err)
+		return nil, fmt.Errorf("creating DOKS node pool: %w", err)
 	}
 
-	return dropletToInstance(droplet), nil
+	// Poll until the node is provisioned and has a droplet ID
+	inst, err := p.waitForNode(ctx, nodePool.ID)
+	if err != nil {
+		// Clean up the node pool if we fail to get the node info
+		_, _ = p.doClient.Kubernetes.DeleteNodePool(ctx, p.clusterID, nodePool.ID)
+		return nil, fmt.Errorf("waiting for node provisioning: %w", err)
+	}
+
+	return inst, nil
 }
 
-// Delete terminates a DigitalOcean Droplet.
-func (p *DefaultProvider) Delete(ctx context.Context, id string) error {
-	dropletID, err := strconv.Atoi(id)
-	if err != nil {
-		return fmt.Errorf("invalid droplet ID %q: %w", id, err)
+// waitForNode polls the DOKS API until the node pool has a provisioned node
+// with a droplet ID assigned. Returns the instance details.
+func (p *DefaultProvider) waitForNode(ctx context.Context, nodePoolID string) (*Instance, error) {
+	const (
+		maxAttempts = 60
+		pollInterval = 5 * time.Second
+	)
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		nodePool, _, err := p.doClient.Kubernetes.GetNodePool(ctx, p.clusterID, nodePoolID)
+		if err != nil {
+			return nil, fmt.Errorf("getting node pool %s: %w", nodePoolID, err)
+		}
+
+		// Check if any node has a droplet ID assigned
+		for _, node := range nodePool.Nodes {
+			if node.DropletID != "" && node.DropletID != "0" {
+				return nodePoolNodeToInstance(nodePool, node, p.region), nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled while waiting for node provisioning: %w", ctx.Err())
+		case <-time.After(pollInterval):
+			continue
+		}
 	}
-	_, err = p.doClient.Droplets.Delete(ctx, dropletID)
+
+	return nil, fmt.Errorf("timed out waiting for node in pool %s to be provisioned", nodePoolID)
+}
+
+// Delete removes a DOKS node pool by its ID.
+func (p *DefaultProvider) Delete(ctx context.Context, nodePoolID string) error {
+	_, err := p.doClient.Kubernetes.DeleteNodePool(ctx, p.clusterID, nodePoolID)
 	if err != nil {
-		return fmt.Errorf("deleting droplet %d: %w", dropletID, err)
+		return fmt.Errorf("deleting DOKS node pool %s: %w", nodePoolID, err)
 	}
 	return nil
 }
 
-// Get retrieves a DigitalOcean Droplet by ID.
-func (p *DefaultProvider) Get(ctx context.Context, id string) (*Instance, error) {
-	dropletID, err := strconv.Atoi(id)
+// Get retrieves an instance by its droplet ID. It searches all Karpenter-managed
+// DOKS node pools in the cluster for a node with the matching droplet ID.
+func (p *DefaultProvider) Get(ctx context.Context, dropletID string) (*Instance, error) {
+	nodePools, err := p.listManagedNodePools(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("invalid droplet ID %q: %w", id, err)
+		return nil, err
 	}
-	droplet, _, err := p.doClient.Droplets.Get(ctx, dropletID)
-	if err != nil {
-		return nil, fmt.Errorf("getting droplet %d: %w", dropletID, err)
+
+	for _, np := range nodePools {
+		for _, node := range np.Nodes {
+			if node.DropletID == dropletID {
+				return nodePoolNodeToInstance(np, node, p.region), nil
+			}
+		}
 	}
-	return dropletToInstance(droplet), nil
+
+	return nil, fmt.Errorf("no DOKS node found with droplet ID %s", dropletID)
 }
 
-// List returns all Karpenter-managed Droplets.
+// List returns all Karpenter-managed instances from DOKS node pools.
 func (p *DefaultProvider) List(ctx context.Context) ([]*Instance, error) {
-	// List droplets by the karpenter-managed tag
-	droplets, _, err := p.doClient.Droplets.ListByTag(ctx, v1alpha1.TagManagedBy, &godo.ListOptions{
-		PerPage: 200,
-	})
+	nodePools, err := p.listManagedNodePools(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing droplets by tag: %w", err)
+		return nil, err
 	}
 
-	// Filter to only droplets belonging to this cluster
-	clusterTag := v1alpha1.TagClusterPrefix + p.clusterName
 	var instances []*Instance
-	for i := range droplets {
-		if hasTag(droplets[i].Tags, clusterTag) {
-			instances = append(instances, dropletToInstance(&droplets[i]))
+	for _, np := range nodePools {
+		for _, node := range np.Nodes {
+			if node.DropletID != "" && node.DropletID != "0" {
+				instances = append(instances, nodePoolNodeToInstance(np, node, p.region))
+			}
 		}
 	}
 	return instances, nil
 }
 
-// dropletToInstance converts a godo Droplet to our Instance type.
-func dropletToInstance(d *godo.Droplet) *Instance {
+// listManagedNodePools lists all DOKS node pools in the cluster that are
+// tagged as Karpenter-managed.
+func (p *DefaultProvider) listManagedNodePools(ctx context.Context) ([]*godo.KubernetesNodePool, error) {
+	allPools, _, err := p.doClient.Kubernetes.ListNodePools(ctx, p.clusterID, &godo.ListOptions{
+		PerPage: 200,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing DOKS node pools: %w", err)
+	}
+
+	// Filter to only Karpenter-managed node pools
+	var managed []*godo.KubernetesNodePool
+	for _, np := range allPools {
+		if hasTag(np.Tags, v1alpha1.TagManagedBy) {
+			managed = append(managed, np)
+		}
+	}
+	return managed, nil
+}
+
+// nodePoolNodeToInstance converts a DOKS node pool and node to our Instance type.
+func nodePoolNodeToInstance(np *godo.KubernetesNodePool, node *godo.KubernetesNode, region string) *Instance {
 	inst := &Instance{
-		ID:     d.ID,
-		Name:   d.Name,
-		Region: d.Region.Slug,
-		Size:   d.Size.Slug,
-		Status: d.Status,
-		Tags:   d.Tags,
+		NodePoolID: np.ID,
+		DropletID:  node.DropletID,
+		Name:       node.Name,
+		Region:     region,
+		Size:       np.Size,
+		Labels:     np.Labels,
+		Tags:       np.Tags,
+		CreatedAt:  node.CreatedAt,
 	}
 
-	// Extract IPs
-	if privateIP, err := d.PrivateIPv4(); err == nil {
-		inst.PrivateIPv4 = privateIP
+	// Map DOKS node status
+	if node.Status != nil {
+		inst.Status = node.Status.State
 	}
-	if publicIP, err := d.PublicIPv4(); err == nil {
-		inst.PublicIPv4 = publicIP
-	}
-
-	// Image ID
-	if d.Image != nil {
-		inst.ImageID = d.Image.ID
-	}
-
-	// VPC UUID
-	inst.VPCUUID = d.VPCUUID
 
 	return inst
 }
@@ -195,12 +251,4 @@ func hasTag(tags []string, tag string) bool {
 		}
 	}
 	return false
-}
-
-// derefString safely dereferences a string pointer.
-func derefString(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
 }

@@ -30,6 +30,10 @@ import (
 
 // DONodeClass is the DigitalOcean-specific configuration for Karpenter node provisioning.
 // It is referenced by a NodePool's spec.template.spec.nodeClassRef.
+//
+// When using DOKS (DigitalOcean Kubernetes Service), node images, VPC placement,
+// and bootstrap configuration are managed automatically by DOKS. The DONodeClass
+// primarily controls region placement and additional tags/metadata for node pools.
 type DONodeClass struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -39,74 +43,24 @@ type DONodeClass struct {
 }
 
 // DONodeClassSpec defines the desired state of DONodeClass.
+// For DOKS clusters, most node configuration (images, VPC, bootstrap) is
+// managed automatically. The spec focuses on region and metadata.
 type DONodeClassSpec struct {
-	// Region is the DigitalOcean region where droplets will be created.
+	// Region is the DigitalOcean region where DOKS node pools will be created.
+	// This must match the region of the DOKS cluster.
 	// Examples: "nyc1", "sfo3", "ams3", "sgp1"
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=3
 	Region string `json:"region"`
 
-	// VPCUUID is the UUID of the VPC where droplets will be placed.
-	// If empty, the default VPC for the region will be used.
-	// +optional
-	VPCUUID string `json:"vpcUUID,omitempty"`
-
-	// Image specifies the OS image configuration for provisioned droplets.
-	// +kubebuilder:validation:Required
-	Image DONodeClassImage `json:"image"`
-
-	// SSHKeys is a list of SSH key fingerprints or IDs to add to provisioned droplets.
-	// +optional
-	SSHKeys []string `json:"sshKeys,omitempty"`
-
-	// Tags are additional tags applied to all droplets managed by this DONodeClass.
+	// Tags are additional tags applied to all DOKS node pools managed by this DONodeClass.
 	// Karpenter-managed tags are automatically added and should not be specified here.
 	// +optional
 	Tags []string `json:"tags,omitempty"`
-
-	// UserData is a cloud-init script or bash script to execute on droplet creation.
-	// This is used to bootstrap the node and join it to the Kubernetes cluster.
-	// +optional
-	UserData *string `json:"userData,omitempty"`
-
-	// BlockStorage configures block storage volumes to attach to provisioned droplets.
-	// +optional
-	BlockStorage *DOBlockStorageSpec `json:"blockStorage,omitempty"`
-}
-
-// DONodeClassImage specifies the image to use for provisioned droplets.
-type DONodeClassImage struct {
-	// Slug is a well-known DigitalOcean image slug (e.g., "ubuntu-24-04-x64").
-	// Mutually exclusive with ID.
-	// +optional
-	Slug string `json:"slug,omitempty"`
-
-	// ID is a custom image or snapshot ID.
-	// Mutually exclusive with Slug.
-	// +optional
-	ID int `json:"id,omitempty"`
-}
-
-// DOBlockStorageSpec configures block storage volumes for droplets.
-type DOBlockStorageSpec struct {
-	// SizeGiB is the size of the block storage volume in GiB.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=16384
-	SizeGiB int `json:"sizeGiB"`
-
-	// FSType is the filesystem type for the volume (e.g., "ext4", "xfs").
-	// +kubebuilder:default="ext4"
-	// +optional
-	FSType string `json:"fsType,omitempty"`
 }
 
 // DONodeClassStatus defines the observed state of DONodeClass.
 type DONodeClassStatus struct {
-	// ImageID is the resolved DigitalOcean image ID.
-	// This is populated after the image slug is resolved to a concrete ID.
-	// +optional
-	ImageID int `json:"imageID,omitempty"`
-
 	// Conditions contains the conditions for the DONodeClass.
 	// +optional
 	Conditions []status.Condition `json:"conditions,omitempty"`
@@ -130,11 +84,8 @@ const (
 	// ConditionTypeReady indicates the DONodeClass is ready for use.
 	ConditionTypeReady = "Ready"
 
-	// ConditionTypeImageResolved indicates the image has been resolved.
-	ConditionTypeImageResolved = "ImageResolved"
-
-	// ConditionTypeVPCValid indicates the VPC is valid and accessible.
-	ConditionTypeVPCValid = "VPCValid"
+	// ConditionTypeValidRegion indicates the region is valid and matches the cluster.
+	ConditionTypeValidRegion = "ValidRegion"
 )
 
 // GetConditions returns the conditions for the DONodeClass.
@@ -153,7 +104,6 @@ func (in *DONodeClass) SetConditions(conditions []status.Condition) {
 // This is required to implement the operatorpkg status.Object interface.
 func (in *DONodeClass) StatusConditions() status.ConditionSet {
 	return status.NewReadyConditions(
-		ConditionTypeImageResolved,
-		ConditionTypeVPCValid,
+		ConditionTypeValidRegion,
 	).For(in)
 }

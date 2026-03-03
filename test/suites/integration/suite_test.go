@@ -21,7 +21,6 @@ limitations under the License.
 //
 //   - DIGITALOCEAN_ACCESS_TOKEN: a valid DigitalOcean API token
 //   - DO_REGION: the region to test in (e.g. "nyc1")
-//   - DO_VPC_UUID: (optional) the VPC UUID to use; if empty, the default VPC is resolved
 //   - CLUSTER_NAME: (optional) name used for tagging; defaults to "integration-test"
 package integration
 
@@ -38,7 +37,6 @@ import (
 type testEnv struct {
 	token       string
 	region      string
-	vpcUUID     string
 	clusterName string
 	client      *godo.Client
 	ctx         context.Context
@@ -70,7 +68,6 @@ func TestMain(m *testing.M) {
 	env = &testEnv{
 		token:       token,
 		region:      region,
-		vpcUUID:     os.Getenv("DO_VPC_UUID"),
 		clusterName: clusterName,
 		client:      client,
 		ctx:         context.Background(),

@@ -26,22 +26,20 @@ const (
 	// AnnotationProviderID is the annotation key for the DO provider ID.
 	AnnotationProviderID = Group + "/provider-id"
 
+	// AnnotationNodePoolID stores the DOKS node pool UUID on the NodeClaim.
+	// This allows efficient deletion without searching all node pools.
+	AnnotationNodePoolID = Group + "/node-pool-id"
+
 	// AnnotationDropletID is the annotation key for the DigitalOcean Droplet ID.
 	AnnotationDropletID = Group + "/droplet-id"
 
-	// AnnotationPrivateIPv4 is the annotation key for the Droplet's private IPv4 address.
-	AnnotationPrivateIPv4 = Group + "/private-ipv4"
-
-	// AnnotationPublicIPv4 is the annotation key for the Droplet's public IPv4 address.
-	AnnotationPublicIPv4 = Group + "/public-ipv4"
-
-	// TagManagedBy is the tag applied to all droplets managed by Karpenter.
+	// TagManagedBy is the tag applied to all DOKS node pools managed by Karpenter.
 	TagManagedBy = "karpenter-managed"
 
-	// TagNodePool is the tag prefix for identifying which NodePool manages a droplet.
+	// TagNodePoolPrefix is the tag prefix for identifying which Karpenter NodePool manages a DOKS node pool.
 	TagNodePoolPrefix = "karpenter-nodepool-"
 
-	// TagCluster is the tag prefix for identifying which cluster a droplet belongs to.
+	// TagClusterPrefix is the tag prefix for identifying which cluster a DOKS node pool belongs to.
 	TagClusterPrefix = "karpenter-cluster-"
 
 	// LabelInstanceTypeFamily indicates the DigitalOcean instance type family.
@@ -56,11 +54,8 @@ const (
 	// LabelRegion is the DigitalOcean region slug (e.g., "nyc1", "sfo3").
 	LabelRegion = Group + "/region"
 
-	// LabelImageID is the resolved image ID used for the droplet.
-	LabelImageID = Group + "/image-id"
-
-	// LabelVPCUUID is the VPC UUID the droplet is placed in.
-	LabelVPCUUID = Group + "/vpc-uuid"
+	// LabelNodePoolID is the DOKS node pool UUID label on the Kubernetes node.
+	LabelNodePoolID = Group + "/node-pool-id"
 )
 
 // Instance type families available on DigitalOcean.

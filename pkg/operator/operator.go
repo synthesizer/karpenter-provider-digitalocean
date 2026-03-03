@@ -32,13 +32,11 @@ import (
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/cloudprovider"
 	nodeclaimcontroller "github.com/digitalocean/karpenter-provider-digitalocean/pkg/controllers/nodeclaim"
 	nodeclasscontroller "github.com/digitalocean/karpenter-provider-digitalocean/pkg/controllers/nodeclass"
-	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/image"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/instance"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/instancetype"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/loadbalancer"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/pricing"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/region"
-	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/vpc"
 
 	karpenteroperator "sigs.k8s.io/karpenter/pkg/operator"
 )
@@ -49,6 +47,12 @@ const (
 
 	// EnvClusterName is the environment variable for the cluster name.
 	EnvClusterName = "CLUSTER_NAME"
+
+	// EnvClusterID is the environment variable for the DOKS cluster UUID.
+	EnvClusterID = "CLUSTER_ID"
+
+	// EnvClusterRegion is the environment variable for the DOKS cluster region.
+	EnvClusterRegion = "CLUSTER_REGION"
 )
 
 // Operator holds all DigitalOcean-specific provider instances and wraps
@@ -61,14 +65,14 @@ type Operator struct {
 	DOClient             *godo.Client
 	InstanceProvider     instance.Provider
 	InstanceTypeProvider instancetype.Provider
-	ImageProvider        image.Provider
 	PricingProvider      pricing.Provider
 	RegionProvider       region.Provider
-	VPCProvider          vpc.Provider
 	LoadBalancerProvider loadbalancer.Provider
 
 	CloudProvider *cloudprovider.CloudProvider
 	ClusterName   string
+	ClusterID     string
+	ClusterRegion string
 }
 
 // NewOperator creates a new DigitalOcean operator with all providers initialized.
@@ -90,6 +94,18 @@ func NewOperator(ctx context.Context, coreOperator *karpenteroperator.Operator) 
 		return nil, fmt.Errorf("environment variable %s is required", EnvClusterName)
 	}
 
+	// Get DOKS cluster ID (required for node pool API calls)
+	clusterID := os.Getenv(EnvClusterID)
+	if clusterID == "" {
+		return nil, fmt.Errorf("environment variable %s is required", EnvClusterID)
+	}
+
+	// Get DOKS cluster region
+	clusterRegion := os.Getenv(EnvClusterRegion)
+	if clusterRegion == "" {
+		return nil, fmt.Errorf("environment variable %s is required", EnvClusterRegion)
+	}
+
 	// Create DigitalOcean API client
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	oauthClient := oauth2.NewClient(ctx, tokenSource)
@@ -104,11 +120,9 @@ func NewOperator(ctx context.Context, coreOperator *karpenteroperator.Operator) 
 		logger.Error(err, "WARNING: failed to seed pricing data, prices may be unavailable")
 	}
 
-	instanceProvider := instance.NewDefaultProvider(doClient, clusterName)
+	instanceProvider := instance.NewDefaultProvider(doClient, clusterID, clusterName, clusterRegion)
 	instanceTypeProvider := instancetype.NewDefaultProvider(doClient, pricingProvider)
-	imageProvider := image.NewDefaultProvider(doClient)
 	regionProvider := region.NewDefaultProvider(doClient)
-	vpcProvider := vpc.NewDefaultProvider(doClient)
 	loadBalancerProvider := loadbalancer.NewDefaultProvider(doClient)
 
 	// Create the CloudProvider that bridges Karpenter core to DigitalOcean
@@ -116,11 +130,12 @@ func NewOperator(ctx context.Context, coreOperator *karpenteroperator.Operator) 
 		coreOperator.GetClient(),
 		instanceProvider,
 		instanceTypeProvider,
-		imageProvider,
 	)
 
 	logger.Info("DigitalOcean operator initialized",
 		"clusterName", clusterName,
+		"clusterID", clusterID,
+		"clusterRegion", clusterRegion,
 	)
 
 	return &Operator{
@@ -128,27 +143,27 @@ func NewOperator(ctx context.Context, coreOperator *karpenteroperator.Operator) 
 		DOClient:             doClient,
 		InstanceProvider:     instanceProvider,
 		InstanceTypeProvider: instanceTypeProvider,
-		ImageProvider:        imageProvider,
 		PricingProvider:      pricingProvider,
 		RegionProvider:       regionProvider,
-		VPCProvider:          vpcProvider,
 		LoadBalancerProvider: loadBalancerProvider,
 		CloudProvider:        cp,
 		ClusterName:          clusterName,
+		ClusterID:            clusterID,
+		ClusterRegion:        clusterRegion,
 	}, nil
 }
 
 // NewControllers returns the DigitalOcean-specific controllers that should be
 // registered alongside the core Karpenter controllers. These handle:
-//   - DONodeClass reconciliation (image resolution, VPC validation, status updates)
-//   - NodeClaim garbage collection (orphaned droplet cleanup)
+//   - DONodeClass reconciliation (region validation, status updates)
+//   - NodeClaim garbage collection (orphaned node pool cleanup)
 //   - DONodeClass status condition management
 func (o *Operator) NewControllers(kubeClient client.Client) []controller.Controller {
 	return []controller.Controller{
-		// DONodeClass controller — resolves images, validates VPCs, manages status
-		nodeclasscontroller.NewController(kubeClient, o.ImageProvider, o.VPCProvider),
+		// DONodeClass controller — validates region, manages status
+		nodeclasscontroller.NewController(kubeClient, o.RegionProvider, o.ClusterRegion),
 
-		// NodeClaim garbage collection — deletes orphaned droplets
+		// NodeClaim garbage collection — deletes orphaned DOKS node pools
 		nodeclaimcontroller.NewGarbageCollectionController(kubeClient, o.InstanceProvider),
 
 		// DONodeClass status controller — manages status conditions using operatorpkg

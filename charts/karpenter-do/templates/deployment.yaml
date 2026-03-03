@@ -40,6 +40,8 @@ spec:
               value: {{ .Values.settings.clusterName | quote }}
             - name: CLUSTER_ENDPOINT
               value: {{ .Values.settings.clusterEndpoint | quote }}
+            - name: CLUSTER_ID
+              value: {{ .Values.settings.clusterID | quote }}
             - name: DIGITALOCEAN_ACCESS_TOKEN
               valueFrom:
                 secretKeyRef:

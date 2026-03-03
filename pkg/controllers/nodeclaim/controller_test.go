@@ -47,34 +47,36 @@ func newTestScheme() *runtime.Scheme {
 	return s
 }
 
-func TestGCDeletesOrphanedDroplets(t *testing.T) {
+func TestGCDeletesOrphanedNodePools(t *testing.T) {
 	ctx := context.Background()
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
 
 	// Add some instances — one has a matching NodeClaim, one doesn't
-	instanceProvider.Instances[100] = &instance.Instance{
-		ID:     100,
-		Name:   "orphan-node",
-		Region: "nyc1",
-		Size:   "s-1vcpu-1gb",
-		Status: "active",
+	instanceProvider.NodePools["nodepool-orphan"] = &instance.Instance{
+		NodePoolID: "nodepool-orphan",
+		DropletID:  "100",
+		Name:       "orphan-node",
+		Region:     "nyc1",
+		Size:       "s-1vcpu-1gb",
+		Status:     "running",
 	}
-	instanceProvider.Instances[200] = &instance.Instance{
-		ID:     200,
-		Name:   "claimed-node",
-		Region: "nyc1",
-		Size:   "s-2vcpu-4gb",
-		Status: "active",
+	instanceProvider.NodePools["nodepool-claimed"] = &instance.Instance{
+		NodePoolID: "nodepool-claimed",
+		DropletID:  "200",
+		Name:       "claimed-node",
+		Region:     "nyc1",
+		Size:       "s-2vcpu-4gb",
+		Status:     "running",
 	}
 
-	// Create a NodeClaim that matches instance 200
+	// Create a NodeClaim that matches instance with droplet ID 200
 	nodeClaim := &karpv1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "claimed-node",
 		},
 		Status: karpv1.NodeClaimStatus{
-			ProviderID: "digitalocean://nyc1/200",
+			ProviderID: "digitalocean://200",
 		},
 	}
 
@@ -93,29 +95,30 @@ func TestGCDeletesOrphanedDroplets(t *testing.T) {
 		t.Fatalf("Reconcile() unexpected error: %v", err)
 	}
 
-	// Orphan (100) should be deleted
-	if _, ok := instanceProvider.Instances[100]; ok {
-		t.Error("expected orphaned instance 100 to be deleted")
+	// Orphan node pool should be deleted
+	if _, ok := instanceProvider.NodePools["nodepool-orphan"]; ok {
+		t.Error("expected orphaned node pool 'nodepool-orphan' to be deleted")
 	}
 
-	// Claimed instance (200) should still exist
-	if _, ok := instanceProvider.Instances[200]; !ok {
-		t.Error("expected claimed instance 200 to still exist")
+	// Claimed node pool should still exist
+	if _, ok := instanceProvider.NodePools["nodepool-claimed"]; !ok {
+		t.Error("expected claimed node pool 'nodepool-claimed' to still exist")
 	}
 }
 
-func TestGCNoOrphanedDroplets(t *testing.T) {
+func TestGCNoOrphanedNodePools(t *testing.T) {
 	ctx := context.Background()
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
 
 	// Add instance with a matching NodeClaim
-	instanceProvider.Instances[100] = &instance.Instance{
-		ID:     100,
-		Name:   "node-1",
-		Region: "nyc1",
-		Size:   "s-1vcpu-1gb",
-		Status: "active",
+	instanceProvider.NodePools["nodepool-1"] = &instance.Instance{
+		NodePoolID: "nodepool-1",
+		DropletID:  "100",
+		Name:       "node-1",
+		Region:     "nyc1",
+		Size:       "s-1vcpu-1gb",
+		Status:     "running",
 	}
 
 	nodeClaim := &karpv1.NodeClaim{
@@ -123,7 +126,7 @@ func TestGCNoOrphanedDroplets(t *testing.T) {
 			Name: "node-1",
 		},
 		Status: karpv1.NodeClaimStatus{
-			ProviderID: "digitalocean://nyc1/100",
+			ProviderID: "digitalocean://100",
 		},
 	}
 
@@ -143,8 +146,8 @@ func TestGCNoOrphanedDroplets(t *testing.T) {
 	}
 
 	// Instance should still exist
-	if _, ok := instanceProvider.Instances[100]; !ok {
-		t.Error("expected instance 100 to still exist (not orphaned)")
+	if _, ok := instanceProvider.NodePools["nodepool-1"]; !ok {
+		t.Error("expected node pool 'nodepool-1' to still exist (not orphaned)")
 	}
 }
 
@@ -197,13 +200,14 @@ func TestGCDeleteOrphanFails(t *testing.T) {
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
 
-	// Add an orphaned instance
-	instanceProvider.Instances[100] = &instance.Instance{
-		ID:     100,
-		Name:   "orphan-node",
-		Region: "nyc1",
-		Size:   "s-1vcpu-1gb",
-		Status: "active",
+	// Add an orphaned node pool
+	instanceProvider.NodePools["nodepool-orphan"] = &instance.Instance{
+		NodePoolID: "nodepool-orphan",
+		DropletID:  "100",
+		Name:       "orphan-node",
+		Region:     "nyc1",
+		Size:       "s-1vcpu-1gb",
+		Status:     "running",
 	}
 
 	// Set delete error so deletion fails
@@ -224,9 +228,9 @@ func TestGCDeleteOrphanFails(t *testing.T) {
 		t.Fatalf("Reconcile() should not return error on individual delete failure, got: %v", err)
 	}
 
-	// The instance should still exist since delete failed
-	if _, ok := instanceProvider.Instances[100]; !ok {
-		t.Error("expected instance 100 to still exist since delete failed")
+	// The node pool should still exist since delete failed
+	if _, ok := instanceProvider.NodePools["nodepool-orphan"]; !ok {
+		t.Error("expected node pool 'nodepool-orphan' to still exist since delete failed")
 	}
 }
 
@@ -235,14 +239,16 @@ func TestGCMultipleOrphans(t *testing.T) {
 
 	instanceProvider := fakeproviders.NewInstanceProvider()
 
-	// Add multiple orphaned instances
-	for i := 100; i < 105; i++ {
-		instanceProvider.Instances[i] = &instance.Instance{
-			ID:     i,
-			Name:   fmt.Sprintf("orphan-%d", i),
-			Region: "nyc1",
-			Size:   "s-1vcpu-1gb",
-			Status: "active",
+	// Add multiple orphaned node pools
+	for i := 0; i < 5; i++ {
+		npID := fmt.Sprintf("nodepool-%d", i)
+		instanceProvider.NodePools[npID] = &instance.Instance{
+			NodePoolID: npID,
+			DropletID:  fmt.Sprintf("%d", 100+i),
+			Name:       fmt.Sprintf("orphan-%d", i),
+			Region:     "nyc1",
+			Size:       "s-1vcpu-1gb",
+			Status:     "running",
 		}
 	}
 
@@ -261,7 +267,7 @@ func TestGCMultipleOrphans(t *testing.T) {
 	}
 
 	// All orphans should be deleted
-	if len(instanceProvider.Instances) != 0 {
-		t.Errorf("expected all orphans to be deleted, got %d remaining", len(instanceProvider.Instances))
+	if len(instanceProvider.NodePools) != 0 {
+		t.Errorf("expected all orphans to be deleted, got %d remaining", len(instanceProvider.NodePools))
 	}
 }

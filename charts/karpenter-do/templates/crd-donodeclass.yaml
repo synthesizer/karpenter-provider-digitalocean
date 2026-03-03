@@ -40,7 +40,11 @@ spec:
           description: >-
             DONodeClass is the DigitalOcean-specific configuration for
             Karpenter node provisioning. It is referenced by a NodePool's
-            spec.template.spec.nodeClassRef.
+            spec.template.spec.nodeClassRef. When using DOKS (DigitalOcean
+            Kubernetes Service), node images, VPC placement, and bootstrap
+            configuration are managed automatically by DOKS. The DONodeClass
+            primarily controls region placement and additional tags/metadata
+            for node pools.
           type: object
           properties:
             apiVersion:
@@ -56,90 +60,35 @@ spec:
             metadata:
               type: object
             spec:
-              description: DONodeClassSpec defines the desired state of DONodeClass.
+              description: >-
+                DONodeClassSpec defines the desired state of DONodeClass.
+                For DOKS clusters, most node configuration (images, VPC,
+                bootstrap) is managed automatically. The spec focuses on
+                region and metadata.
               type: object
               required:
                 - region
-                - image
               properties:
                 region:
                   description: >-
-                    Region is the DigitalOcean region where droplets will be
-                    created. Examples: "nyc1", "sfo3", "ams3", "sgp1"
+                    Region is the DigitalOcean region where DOKS node pools
+                    will be created. This must match the region of the DOKS
+                    cluster. Examples: "nyc1", "sfo3", "ams3", "sgp1"
                   type: string
                   minLength: 3
-                vpcUUID:
-                  description: >-
-                    VPCUUID is the UUID of the VPC where droplets will be placed.
-                    If empty, the default VPC for the region will be used.
-                  type: string
-                image:
-                  description: >-
-                    Image specifies the OS image configuration for provisioned
-                    droplets.
-                  type: object
-                  properties:
-                    slug:
-                      description: >-
-                        Slug is a well-known DigitalOcean image slug
-                        (e.g., "ubuntu-24-04-x64"). Mutually exclusive with ID.
-                      type: string
-                    id:
-                      description: >-
-                        ID is a custom image or snapshot ID. Mutually exclusive
-                        with Slug.
-                      type: integer
-                sshKeys:
-                  description: >-
-                    SSHKeys is a list of SSH key fingerprints or IDs to add to
-                    provisioned droplets.
-                  type: array
-                  items:
-                    type: string
                 tags:
                   description: >-
-                    Tags are additional tags applied to all droplets managed by
-                    this DONodeClass. Karpenter-managed tags are automatically
-                    added and should not be specified here.
+                    Tags are additional tags applied to all DOKS node pools
+                    managed by this DONodeClass. Karpenter-managed tags are
+                    automatically added and should not be specified here.
                   type: array
                   items:
                     type: string
-                userData:
-                  description: >-
-                    UserData is a cloud-init script or bash script to execute on
-                    droplet creation. This is used to bootstrap the node and join
-                    it to the Kubernetes cluster.
-                  type: string
-                blockStorage:
-                  description: >-
-                    BlockStorage configures block storage volumes to attach to
-                    provisioned droplets.
-                  type: object
-                  required:
-                    - sizeGiB
-                  properties:
-                    sizeGiB:
-                      description: >-
-                        SizeGiB is the size of the block storage volume in GiB.
-                      type: integer
-                      minimum: 1
-                      maximum: 16384
-                    fsType:
-                      description: >-
-                        FSType is the filesystem type for the volume
-                        (e.g., "ext4", "xfs").
-                      type: string
-                      default: "ext4"
             status:
               description: >-
                 DONodeClassStatus defines the observed state of DONodeClass.
               type: object
               properties:
-                imageID:
-                  description: >-
-                    ImageID is the resolved DigitalOcean image ID. This is
-                    populated after the image slug is resolved to a concrete ID.
-                  type: integer
                 specHash:
                   description: >-
                     SpecHash is the hash of the DONodeClassSpec, used for drift

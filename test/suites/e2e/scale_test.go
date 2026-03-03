@@ -28,7 +28,7 @@ import (
 const (
 	defaultNamespace = "default"
 
-	// Timeouts — droplet creation + boot can be slow.
+	// Timeouts — DOKS node pool creation + boot can be slow.
 	nodeClaimTimeout   = 5 * time.Minute
 	nodeReadyTimeout   = 10 * time.Minute
 	deployReadyTimeout = 12 * time.Minute
@@ -42,12 +42,12 @@ const (
 //  2. Create DONodeClass + NodePool.
 //  3. Deploy an "inflate" workload whose nodeSelector targets Karpenter nodes.
 //  4. Karpenter sees the pending pod, creates a NodeClaim, and provisions a
-//     DigitalOcean Droplet.
-//  5. The Droplet joins the cluster, the pod is scheduled and becomes Running.
+//     DOKS node pool (with Count=1).
+//  5. The node joins the cluster, the pod is scheduled and becomes Running.
 //  6. Verify the new node was created by Karpenter (labels), not the DOKS
 //     cluster autoscaler.
 //  7. Delete the workload.
-//  8. Karpenter consolidates and removes the Droplet.
+//  8. Karpenter consolidates and removes the node pool.
 //  9. Cluster returns to the initial size.
 //
 // ─────────────────────────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ func TestScaleUpAndDown(t *testing.T) {
 
 	// ── Step 7: verify it was Karpenter, NOT cluster autoscaler ──────────
 	verifyKarpenterLabels(t, ctx, newNodeName)
-	verifyNodeNotInDOKSPool(t, ctx, newNodeName)
+	verifyNodeInDOKSPool(t, ctx, newNodeName)
 	t.Log("Confirmed: scaling was performed by Karpenter")
 
 	// ── Step 8: remove the workload ──────────────────────────────────────

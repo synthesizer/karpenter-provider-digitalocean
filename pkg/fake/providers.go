@@ -20,8 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
-
-	"github.com/digitalocean/godo"
+	"time"
 
 	v1alpha1 "github.com/digitalocean/karpenter-provider-digitalocean/pkg/apis/v1alpha1"
 	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/instance"
@@ -33,10 +32,19 @@ import (
 // --- Instance Provider Mock ---
 
 // InstanceProvider is a fake implementation of the instance.Provider interface.
+// It models DOKS node pools — each entry in NodePools represents one node pool
+// with a single node (Count=1), keyed by the node pool ID.
 type InstanceProvider struct {
-	mu        sync.Mutex
-	Instances map[int]*instance.Instance
-	NextID    int
+	mu sync.Mutex
+
+	// NodePools stores fake instances keyed by NodePoolID.
+	NodePools map[string]*instance.Instance
+
+	// NextNodePoolID is a counter used to generate unique node pool IDs.
+	NextNodePoolID int
+
+	// NextDropletID is a counter used to generate unique droplet IDs.
+	NextDropletID int
 
 	// Error injection
 	CreateError error
@@ -51,11 +59,12 @@ type InstanceProvider struct {
 	ListCalls   int
 }
 
-// NewInstanceProvider creates a new fake instance provider.
+// NewInstanceProvider creates a new fake instance provider for DOKS node pools.
 func NewInstanceProvider() *InstanceProvider {
 	return &InstanceProvider{
-		Instances: make(map[int]*instance.Instance),
-		NextID:    100000,
+		NodePools:      make(map[string]*instance.Instance),
+		NextNodePoolID: 1,
+		NextDropletID:  100000,
 	}
 }
 
@@ -71,25 +80,31 @@ func (p *InstanceProvider) Create(_ context.Context, nodeClass *v1alpha1.DONodeC
 		return nil, fmt.Errorf("no instance types provided")
 	}
 
-	id := p.NextID
-	p.NextID++
+	nodePoolID := fmt.Sprintf("nodepool-%d", p.NextNodePoolID)
+	p.NextNodePoolID++
+
+	dropletID := fmt.Sprintf("%d", p.NextDropletID)
+	p.NextDropletID++
 
 	inst := &instance.Instance{
-		ID:          id,
-		Name:        nodeClaim.Name,
-		Region:      nodeClass.Spec.Region,
-		Size:        instanceTypes[0].Name,
-		Status:      "active",
-		PrivateIPv4: "10.0.0.2",
-		Tags:        []string{v1alpha1.TagManagedBy, v1alpha1.TagClusterPrefix + "test-cluster"},
-		ImageID:     nodeClass.Status.ImageID,
-		VPCUUID:     nodeClass.Spec.VPCUUID,
+		NodePoolID: nodePoolID,
+		DropletID:  dropletID,
+		Name:       fmt.Sprintf("karp-%s", nodeClaim.Name),
+		Region:     nodeClass.Spec.Region,
+		Size:       instanceTypes[0].Name,
+		Status:     "running",
+		Labels: map[string]string{
+			v1alpha1.LabelInstanceSize: instanceTypes[0].Name,
+			v1alpha1.LabelRegion:       nodeClass.Spec.Region,
+		},
+		Tags:      append([]string{v1alpha1.TagManagedBy, v1alpha1.TagClusterPrefix + "test-cluster"}, nodeClass.Spec.Tags...),
+		CreatedAt: time.Now(),
 	}
-	p.Instances[id] = inst
+	p.NodePools[nodePoolID] = inst
 	return inst, nil
 }
 
-func (p *InstanceProvider) Delete(_ context.Context, id string) error {
+func (p *InstanceProvider) Delete(_ context.Context, nodePoolID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.DeleteCalls++
@@ -98,19 +113,14 @@ func (p *InstanceProvider) Delete(_ context.Context, id string) error {
 		return p.DeleteError
 	}
 
-	var dropletID int
-	if _, err := fmt.Sscanf(id, "%d", &dropletID); err != nil {
-		return fmt.Errorf("invalid droplet ID %q", id)
+	if _, ok := p.NodePools[nodePoolID]; !ok {
+		return fmt.Errorf("node pool %q not found", nodePoolID)
 	}
-
-	if _, ok := p.Instances[dropletID]; !ok {
-		return fmt.Errorf("droplet %d not found", dropletID)
-	}
-	delete(p.Instances, dropletID)
+	delete(p.NodePools, nodePoolID)
 	return nil
 }
 
-func (p *InstanceProvider) Get(_ context.Context, id string) (*instance.Instance, error) {
+func (p *InstanceProvider) Get(_ context.Context, dropletID string) (*instance.Instance, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.GetCalls++
@@ -119,16 +129,14 @@ func (p *InstanceProvider) Get(_ context.Context, id string) (*instance.Instance
 		return nil, p.GetError
 	}
 
-	var dropletID int
-	if _, err := fmt.Sscanf(id, "%d", &dropletID); err != nil {
-		return nil, fmt.Errorf("invalid droplet ID %q", id)
+	// Search all node pools for the instance with the matching droplet ID
+	for _, inst := range p.NodePools {
+		if inst.DropletID == dropletID {
+			return inst, nil
+		}
 	}
 
-	inst, ok := p.Instances[dropletID]
-	if !ok {
-		return nil, fmt.Errorf("droplet %d not found", dropletID)
-	}
-	return inst, nil
+	return nil, fmt.Errorf("no instance found with droplet ID %q", dropletID)
 }
 
 func (p *InstanceProvider) List(_ context.Context) ([]*instance.Instance, error) {
@@ -141,7 +149,7 @@ func (p *InstanceProvider) List(_ context.Context) ([]*instance.Instance, error)
 	}
 
 	var result []*instance.Instance
-	for _, inst := range p.Instances {
+	for _, inst := range p.NodePools {
 		result = append(result, inst)
 	}
 	return result, nil
@@ -167,48 +175,6 @@ func (p *InstanceTypeProvider) List(_ context.Context, _ *v1alpha1.DONodeClass) 
 		return nil, p.ListError
 	}
 	return p.InstanceTypes, nil
-}
-
-// --- Image Provider Mock ---
-
-// ImageProvider is a fake implementation of the image.Provider interface.
-type ImageProvider struct {
-	// ImageIDs maps DONodeClass names to resolved image IDs.
-	ImageIDs map[string]int
-	// DefaultImageID is returned when no specific mapping exists.
-	DefaultImageID int
-
-	ResolveError error
-	ResolveCalls int
-}
-
-// NewImageProvider creates a new fake image provider.
-func NewImageProvider() *ImageProvider {
-	return &ImageProvider{
-		ImageIDs:       make(map[string]int),
-		DefaultImageID: 12345678,
-	}
-}
-
-func (p *ImageProvider) Resolve(_ context.Context, nodeClass *v1alpha1.DONodeClass) (int, error) {
-	p.ResolveCalls++
-	if p.ResolveError != nil {
-		return 0, p.ResolveError
-	}
-
-	if nodeClass.Spec.Image.ID != 0 {
-		return nodeClass.Spec.Image.ID, nil
-	}
-
-	if id, ok := p.ImageIDs[nodeClass.Spec.Image.Slug]; ok {
-		return id, nil
-	}
-
-	if nodeClass.Spec.Image.Slug == "" {
-		return 0, fmt.Errorf("no image slug or ID specified")
-	}
-
-	return p.DefaultImageID, nil
 }
 
 // --- Pricing Provider Mock ---
@@ -277,51 +243,6 @@ func (p *RegionProvider) List(_ context.Context) ([]string, error) {
 
 func (p *RegionProvider) IsAvailable(_ context.Context, region string) bool {
 	return p.Regions[region]
-}
-
-// --- VPC Provider Mock ---
-
-// VPCProvider is a fake implementation of the vpc.Provider interface.
-type VPCProvider struct {
-	VPCs     map[string]*godo.VPC
-	GetError error
-}
-
-// NewVPCProvider creates a new fake VPC provider.
-func NewVPCProvider() *VPCProvider {
-	return &VPCProvider{
-		VPCs: map[string]*godo.VPC{
-			"vpc-123": {
-				ID:          "vpc-123",
-				URN:         "do:vpc:vpc-123",
-				Name:        "test-vpc",
-				RegionSlug:  "nyc1",
-				Description: "Test VPC",
-				IPRange:     "10.10.10.0/24",
-				Default:     true,
-			},
-		},
-	}
-}
-
-func (p *VPCProvider) Get(_ context.Context, id string) (*godo.VPC, error) {
-	if p.GetError != nil {
-		return nil, p.GetError
-	}
-	vpc, ok := p.VPCs[id]
-	if !ok {
-		return nil, fmt.Errorf("VPC %q not found", id)
-	}
-	return vpc, nil
-}
-
-func (p *VPCProvider) GetDefault(_ context.Context, region string) (*godo.VPC, error) {
-	for _, vpc := range p.VPCs {
-		if vpc.RegionSlug == region && vpc.Default {
-			return vpc, nil
-		}
-	}
-	return nil, fmt.Errorf("no default VPC found for region %q", region)
 }
 
 // --- Load Balancer Provider Mock ---

@@ -28,27 +28,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	v1alpha1 "github.com/digitalocean/karpenter-provider-digitalocean/pkg/apis/v1alpha1"
-	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/image"
-	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/vpc"
+	"github.com/digitalocean/karpenter-provider-digitalocean/pkg/providers/region"
 )
 
 // Controller reconciles DONodeClass resources.
+// For DOKS, the controller validates that the DONodeClass region matches the
+// cluster region, since DOKS node pools must be in the same region as the cluster.
 type Controller struct {
-	client        client.Client
-	imageProvider image.Provider
-	vpcProvider   vpc.Provider
+	client         client.Client
+	regionProvider region.Provider
+	clusterRegion  string
 }
 
 // NewController creates a new NodeClass controller.
-func NewController(client client.Client, imageProvider image.Provider, vpcProvider vpc.Provider) *Controller {
+func NewController(client client.Client, regionProvider region.Provider, clusterRegion string) *Controller {
 	return &Controller{
-		client:        client,
-		imageProvider: imageProvider,
-		vpcProvider:   vpcProvider,
+		client:         client,
+		regionProvider: regionProvider,
+		clusterRegion:  clusterRegion,
 	}
 }
 
 // Reconcile handles DONodeClass reconciliation.
+// It validates the region is valid and matches the cluster region.
 func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling DONodeClass", "name", req.Name)
@@ -59,30 +61,28 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Resolve image
-	imageID, err := c.imageProvider.Resolve(ctx, nodeClass)
-	if err != nil {
-		c.setCondition(nodeClass, v1alpha1.ConditionTypeImageResolved, metav1.ConditionFalse, "ResolveFailed", err.Error())
+	// Validate region exists and is available
+	if !c.regionProvider.IsAvailable(ctx, nodeClass.Spec.Region) {
+		c.setCondition(nodeClass, v1alpha1.ConditionTypeValidRegion, metav1.ConditionFalse,
+			"InvalidRegion", fmt.Sprintf("Region %q is not available", nodeClass.Spec.Region))
 		if updateErr := c.client.Status().Update(ctx, nodeClass); updateErr != nil {
 			return ctrl.Result{}, fmt.Errorf("updating status: %w", updateErr)
 		}
-		return ctrl.Result{}, fmt.Errorf("resolving image: %w", err)
+		return ctrl.Result{}, fmt.Errorf("region %q is not available", nodeClass.Spec.Region)
 	}
 
-	nodeClass.Status.ImageID = imageID
-	c.setCondition(nodeClass, v1alpha1.ConditionTypeImageResolved, metav1.ConditionTrue, "Resolved", fmt.Sprintf("Image resolved to ID %d", imageID))
-
-	// Validate VPC if specified
-	if nodeClass.Spec.VPCUUID != "" {
-		if _, err := c.vpcProvider.Get(ctx, nodeClass.Spec.VPCUUID); err != nil {
-			c.setCondition(nodeClass, v1alpha1.ConditionTypeVPCValid, metav1.ConditionFalse, "InvalidVPC", err.Error())
-			if updateErr := c.client.Status().Update(ctx, nodeClass); updateErr != nil {
-				return ctrl.Result{}, fmt.Errorf("updating status: %w", updateErr)
-			}
-			return ctrl.Result{}, fmt.Errorf("validating VPC: %w", err)
+	// Validate region matches the cluster region
+	if nodeClass.Spec.Region != c.clusterRegion {
+		c.setCondition(nodeClass, v1alpha1.ConditionTypeValidRegion, metav1.ConditionFalse,
+			"RegionMismatch", fmt.Sprintf("DONodeClass region %q does not match cluster region %q", nodeClass.Spec.Region, c.clusterRegion))
+		if updateErr := c.client.Status().Update(ctx, nodeClass); updateErr != nil {
+			return ctrl.Result{}, fmt.Errorf("updating status: %w", updateErr)
 		}
-		c.setCondition(nodeClass, v1alpha1.ConditionTypeVPCValid, metav1.ConditionTrue, "Valid", "VPC is valid and accessible")
+		return ctrl.Result{}, fmt.Errorf("DONodeClass region %q does not match cluster region %q", nodeClass.Spec.Region, c.clusterRegion)
 	}
+
+	c.setCondition(nodeClass, v1alpha1.ConditionTypeValidRegion, metav1.ConditionTrue,
+		"Valid", fmt.Sprintf("Region %q is valid and matches cluster", nodeClass.Spec.Region))
 
 	// Set overall Ready condition
 	c.setCondition(nodeClass, v1alpha1.ConditionTypeReady, metav1.ConditionTrue, "Ready", "DONodeClass is ready")
@@ -92,7 +92,7 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
-	logger.Info("DONodeClass reconciled successfully", "name", req.Name, "imageID", imageID)
+	logger.Info("DONodeClass reconciled successfully", "name", req.Name, "region", nodeClass.Spec.Region)
 	return ctrl.Result{}, nil
 }
 
