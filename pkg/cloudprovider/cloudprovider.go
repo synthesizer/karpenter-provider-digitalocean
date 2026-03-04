@@ -228,12 +228,24 @@ func (c *CloudProvider) instanceToNodeClaim(inst *instance.Instance, existingCla
 	// digitalocean://<dropletID>
 	nodeClaim.Status.ProviderID = fmt.Sprintf("%s%s", providerIDPrefix, inst.DropletID)
 
-	// Set labels from the instance
+	// Set labels from the instance.
+	// IMPORTANT: Karpenter's scheduling.Requirements.Labels() intentionally
+	// skips "well-known" labels (kubernetes.io/os, kubernetes.io/arch,
+	// karpenter.sh/capacity-type, topology.kubernetes.io/region,
+	// node.kubernetes.io/instance-type, etc.) because they are "restricted".
+	// The cloud provider MUST set them here so they appear on the NodeClaim.
+	// Without these, Karpenter's core drift controller detects
+	// "RequirementsDrifted" immediately after launch.
 	if nodeClaim.Labels == nil {
 		nodeClaim.Labels = make(map[string]string)
 	}
+	// Well-known labels that must be set by the cloud provider
 	nodeClaim.Labels[v1.LabelTopologyRegion] = inst.Region
 	nodeClaim.Labels[v1.LabelInstanceTypeStable] = inst.Size
+	nodeClaim.Labels[v1.LabelOSStable] = "linux"
+	nodeClaim.Labels[v1.LabelArchStable] = "amd64"
+	nodeClaim.Labels[karpv1.CapacityTypeLabelKey] = karpv1.CapacityTypeOnDemand
+	// Custom DO-specific labels
 	nodeClaim.Labels[v1alpha1.LabelInstanceSize] = inst.Size
 	nodeClaim.Labels[v1alpha1.LabelRegion] = inst.Region
 

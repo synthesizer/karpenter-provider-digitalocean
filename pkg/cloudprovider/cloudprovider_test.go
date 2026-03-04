@@ -156,6 +156,19 @@ func TestInstanceToNodeClaimLabels(t *testing.T) {
 		t.Errorf("expected instance type label %q, got %q", "s-2vcpu-4gb", got)
 	}
 
+	// Verify well-known labels required by Karpenter core drift detection.
+	// These are "restricted" labels that scheduling.Requirements.Labels() filters out,
+	// so the cloud provider MUST set them explicitly on the NodeClaim.
+	if got := nc.Labels[v1.LabelOSStable]; got != "linux" {
+		t.Errorf("expected OS label %q, got %q", "linux", got)
+	}
+	if got := nc.Labels[v1.LabelArchStable]; got != "amd64" {
+		t.Errorf("expected arch label %q, got %q", "amd64", got)
+	}
+	if got := nc.Labels[karpv1.CapacityTypeLabelKey]; got != karpv1.CapacityTypeOnDemand {
+		t.Errorf("expected capacity type label %q, got %q", karpv1.CapacityTypeOnDemand, got)
+	}
+
 	// Verify DO-specific labels
 	if got := nc.Labels[v1alpha1.LabelInstanceSize]; got != "s-2vcpu-4gb" {
 		t.Errorf("expected instance size label %q, got %q", "s-2vcpu-4gb", got)
