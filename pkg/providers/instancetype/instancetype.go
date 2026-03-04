@@ -78,8 +78,23 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.DONodeCl
 	return p.filterByRegion(instanceTypes, nodeClass.Spec.Region), nil
 }
 
-// fetchInstanceTypes retrieves all DigitalOcean sizes and converts them to Karpenter InstanceTypes.
+// fetchInstanceTypes retrieves DigitalOcean sizes that are valid for DOKS
+// node pools and converts them to Karpenter InstanceTypes. It cross-references
+// the general Sizes API with the Kubernetes Options API to ensure only
+// DOKS-compatible sizes are offered.
 func (p *DefaultProvider) fetchInstanceTypes(ctx context.Context) ([]*cloudprovider.InstanceType, error) {
+	// Get the set of sizes that DOKS actually accepts for node pools.
+	// Not all droplet sizes from the Sizes API are valid for Kubernetes.
+	doksOptions, _, err := p.doClient.Kubernetes.GetOptions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing DOKS options: %w", err)
+	}
+	validSlugs := make(map[string]bool, len(doksOptions.Sizes))
+	for _, s := range doksOptions.Sizes {
+		validSlugs[s.Slug] = true
+	}
+
+	// Fetch full size details (CPU, memory, disk, pricing, regions) from the Sizes API
 	sizes, _, err := p.doClient.Sizes.List(ctx, &godo.ListOptions{PerPage: 200})
 	if err != nil {
 		return nil, fmt.Errorf("listing DO sizes: %w", err)
@@ -88,6 +103,10 @@ func (p *DefaultProvider) fetchInstanceTypes(ctx context.Context) ([]*cloudprovi
 	var instanceTypes []*cloudprovider.InstanceType
 	for _, size := range sizes {
 		if !size.Available {
+			continue
+		}
+		// Only include sizes that DOKS accepts for node pools
+		if !validSlugs[size.Slug] {
 			continue
 		}
 		it := p.sizeToInstanceType(size)
