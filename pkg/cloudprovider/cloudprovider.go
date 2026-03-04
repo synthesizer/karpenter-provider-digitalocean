@@ -237,8 +237,9 @@ func (c *CloudProvider) instanceToNodeClaim(inst *instance.Instance, existingCla
 	nodeClaim.Labels[v1alpha1.LabelInstanceSize] = inst.Size
 	nodeClaim.Labels[v1alpha1.LabelRegion] = inst.Region
 
-	// Set node name
-	nodeClaim.Status.NodeName = inst.Name
+	// NOTE: Do NOT set Status.NodeName here. Karpenter's core registration
+	// controller discovers and sets the node name when it matches the node
+	// by providerID and completes registration.
 
 	// Store node pool ID and droplet ID as annotations for efficient operations
 	if nodeClaim.Annotations == nil {

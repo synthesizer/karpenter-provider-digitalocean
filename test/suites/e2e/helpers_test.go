@@ -589,7 +589,11 @@ func dumpClusterState(t *testing.T, ctx context.Context) {
 					ready = string(c.Status)
 				}
 			}
-			t.Logf("  %s  Ready=%s  labels=%v", n.Name, ready, n.Labels)
+			t.Logf("  %s  Ready=%s  providerID=%s", n.Name, ready, n.Spec.ProviderID)
+			t.Logf("    labels=%v", n.Labels)
+			if len(n.Spec.Taints) > 0 {
+				t.Logf("    taints=%v", n.Spec.Taints)
+			}
 		}
 	}
 
@@ -597,7 +601,16 @@ func dumpClusterState(t *testing.T, ctx context.Context) {
 	if claims != nil {
 		t.Logf("── NodeClaims (%d) ──", len(claims.Items))
 		for _, c := range claims.Items {
+			status, _, _ := unstructured.NestedMap(c.Object, "status")
+			providerID, _, _ := unstructured.NestedString(c.Object, "status", "providerID")
+			nodeName, _, _ := unstructured.NestedString(c.Object, "status", "nodeName")
+			conditions, _, _ := unstructured.NestedSlice(c.Object, "status", "conditions")
 			t.Logf("  %s  labels=%v", c.GetName(), c.GetLabels())
+			t.Logf("    providerID=%s  nodeName=%s", providerID, nodeName)
+			if len(conditions) > 0 {
+				t.Logf("    conditions=%v", conditions)
+			}
+			_ = status // suppress unused warning
 		}
 	}
 
@@ -606,6 +619,25 @@ func dumpClusterState(t *testing.T, ctx context.Context) {
 		t.Logf("── NodePools (%d) ──", len(pools.Items))
 		for _, p := range pools.Items {
 			t.Logf("  %s", p.GetName())
+		}
+	}
+
+	// Dump Karpenter controller pod logs (last 50 lines) for debugging
+	pods, _ := kubeClient.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=karpenter",
+	})
+	if pods != nil && len(pods.Items) > 0 {
+		for _, pod := range pods.Items {
+			sinceSeconds := int64(300) // last 5 minutes
+			tailLines := int64(80)
+			logs, logErr := kubeClient.CoreV1().Pods("kube-system").GetLogs(pod.Name, &corev1.PodLogOptions{
+				SinceSeconds: &sinceSeconds,
+				TailLines:    &tailLines,
+			}).Do(ctx).Raw()
+			if logErr == nil {
+				t.Logf("── Karpenter pod %s logs (last 80 lines) ──", pod.Name)
+				t.Logf("%s", string(logs))
+			}
 		}
 	}
 }

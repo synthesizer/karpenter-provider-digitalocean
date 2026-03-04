@@ -99,13 +99,23 @@ func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1alpha1.DONode
 		nodePoolName = nodePoolName[:255]
 	}
 
-	// Create the DOKS node pool with Count=1
+	// Create the DOKS node pool with Count=1.
+	// The karpenter.sh/unregistered:NoExecute taint is critical: Karpenter's
+	// registration controller requires it to be present on new nodes.
+	// Without it, Karpenter refuses to register the node (apply labels, etc.)
+	// and the node remains unmanaged.
 	createReq := &godo.KubernetesNodePoolCreateRequest{
 		Name:   nodePoolName,
 		Size:   selectedType.Name,
 		Count:  1,
 		Tags:   tags,
 		Labels: labels,
+		Taints: []godo.Taint{
+			{
+				Key:    "karpenter.sh/unregistered",
+				Effect: "NoExecute",
+			},
+		},
 	}
 
 	nodePool, _, err := p.doClient.Kubernetes.CreateNodePool(ctx, p.clusterID, createReq)

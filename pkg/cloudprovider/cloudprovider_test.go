@@ -217,9 +217,10 @@ func TestInstanceToNodeClaimWithExistingClaim(t *testing.T) {
 		t.Error("region label should be added")
 	}
 
-	// Should use the instance name as node name
-	if nc.Status.NodeName != "new-node" {
-		t.Errorf("expected node name %q, got %q", "new-node", nc.Status.NodeName)
+	// NodeName should NOT be set by instanceToNodeClaim — Karpenter's core
+	// Registration controller handles this during node registration.
+	if nc.Status.NodeName != "" {
+		t.Errorf("expected empty node name (set by Karpenter core), got %q", nc.Status.NodeName)
 	}
 
 	// Ensure original is not modified (deep copy)
