@@ -98,6 +98,10 @@ func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *karpv1.NodeClaim)
 
 	inst, err := c.instanceProvider.Get(ctx, dropletID)
 	if err != nil {
+		// If the instance is already gone, deletion is a no-op
+		if cloudprovider.IsNodeClaimNotFoundError(err) {
+			return nil
+		}
 		return fmt.Errorf("getting instance for deletion: %w", err)
 	}
 

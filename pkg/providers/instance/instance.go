@@ -167,9 +167,14 @@ func (p *DefaultProvider) waitForNode(ctx context.Context, nodePoolID string) (*
 }
 
 // Delete removes a DOKS node pool by its ID.
+// If the node pool is already gone (404), this is treated as success.
 func (p *DefaultProvider) Delete(ctx context.Context, nodePoolID string) error {
-	_, err := p.doClient.Kubernetes.DeleteNodePool(ctx, p.clusterID, nodePoolID)
+	resp, err := p.doClient.Kubernetes.DeleteNodePool(ctx, p.clusterID, nodePoolID)
 	if err != nil {
+		// Treat 404 as success — the node pool is already gone
+		if resp != nil && resp.StatusCode == 404 {
+			return nil
+		}
 		return fmt.Errorf("deleting DOKS node pool %s: %w", nodePoolID, err)
 	}
 	return nil
@@ -191,7 +196,7 @@ func (p *DefaultProvider) Get(ctx context.Context, dropletID string) (*Instance,
 		}
 	}
 
-	return nil, fmt.Errorf("no DOKS node found with droplet ID %s", dropletID)
+	return nil, cloudprovider.NewNodeClaimNotFoundError(fmt.Errorf("no DOKS node found with droplet ID %s", dropletID))
 }
 
 // List returns all Karpenter-managed instances from DOKS node pools.

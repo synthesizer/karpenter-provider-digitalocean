@@ -184,7 +184,7 @@ func createNodePool(t *testing.T, ctx context.Context, name, nodeClassName strin
 				},
 				"disruption": map[string]interface{}{
 					"consolidationPolicy": "WhenEmpty",
-					"consolidateAfter":    "30s",
+					"consolidateAfter":    "5m",
 				},
 			},
 		},
@@ -231,7 +231,7 @@ func createNodePoolWithLimits(t *testing.T, ctx context.Context, name, nodeClass
 				},
 				"disruption": map[string]interface{}{
 					"consolidationPolicy": "WhenEmpty",
-					"consolidateAfter":    "30s",
+					"consolidateAfter":    "5m",
 				},
 			},
 		},
