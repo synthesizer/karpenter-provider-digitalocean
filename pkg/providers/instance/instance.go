@@ -131,6 +131,22 @@ func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1alpha1.DONode
 		return nil, fmt.Errorf("waiting for node provisioning: %w", err)
 	}
 
+	// Remove the karpenter.sh/unregistered taint from the DOKS node pool spec.
+	// The taint was needed at creation time so the kubelet registers the node with
+	// it (Karpenter's registration controller requires it). However, DOKS
+	// continuously enforces taints from the node pool spec, so if we leave the
+	// taint in the spec, DOKS will re-apply it after Karpenter removes it during
+	// registration — preventing any pods from scheduling on the node.
+	emptyTaints := []godo.Taint{}
+	_, _, updateErr := p.doClient.Kubernetes.UpdateNodePool(ctx, p.clusterID, nodePool.ID, &godo.KubernetesNodePoolUpdateRequest{
+		Taints: &emptyTaints,
+	})
+	if updateErr != nil {
+		// Log but don't fail: the node pool is usable; the taint issue may
+		// resolve once Karpenter's registration controller runs.
+		fmt.Printf("warning: failed to clear taints from DOKS node pool %s: %v\n", nodePool.ID, updateErr)
+	}
+
 	return inst, nil
 }
 
