@@ -291,8 +291,8 @@ func createInflateDeployment(t *testing.T, ctx context.Context, namespace, name,
 							Image: "registry.k8s.io/pause:3.9",
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("1"),
-									corev1.ResourceMemory: resource.MustParse("512Mi"),
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("256Mi"),
 								},
 							},
 						},

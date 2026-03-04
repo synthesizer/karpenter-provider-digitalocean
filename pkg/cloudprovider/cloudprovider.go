@@ -19,6 +19,7 @@ package cloudprovider
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/awslabs/operatorpkg/status"
@@ -65,19 +66,30 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim)
 		return nil, fmt.Errorf("resolving node class: %w", err)
 	}
 
-	// 2. Get compatible instance types
+	// 2. Get all compatible instance types for this DONodeClass
 	instanceTypes, err := c.instanceTypeProvider.List(ctx, nodeClass)
 	if err != nil {
 		return nil, fmt.Errorf("listing instance types: %w", err)
 	}
 
-	// 3. Create the DOKS node pool
-	created, err := c.instanceProvider.Create(ctx, nodeClass, nodeClaim, instanceTypes)
+	// 3. Filter instance types by the NodeClaim's requirements.
+	// Karpenter's scheduler determines which types can satisfy the pod's
+	// resource requests and records them in spec.requirements under
+	// "node.kubernetes.io/instance-type In [type1, type2, ...]".
+	// Without this filtering, instanceProvider.Create would pick the first
+	// (smallest) type, which may not have enough resources for the pods.
+	filteredTypes := filterInstanceTypesByRequirements(instanceTypes, nodeClaim)
+	if len(filteredTypes) == 0 {
+		return nil, fmt.Errorf("no instance types match NodeClaim requirements (had %d total types)", len(instanceTypes))
+	}
+
+	// 4. Create the DOKS node pool with the filtered types
+	created, err := c.instanceProvider.Create(ctx, nodeClass, nodeClaim, filteredTypes)
 	if err != nil {
 		return nil, fmt.Errorf("creating instance: %w", err)
 	}
 
-	// 4. Convert the instance to a NodeClaim
+	// 5. Convert the instance to a NodeClaim
 	return c.instanceToNodeClaim(created, nodeClaim), nil
 }
 
@@ -270,6 +282,53 @@ func (c *CloudProvider) instanceToNodeClaim(inst *instance.Instance, existingCla
 	}
 
 	return nodeClaim
+}
+
+// filterInstanceTypesByRequirements filters instance types to only those allowed
+// by the NodeClaim's spec.requirements. Karpenter's scheduler populates the
+// "node.kubernetes.io/instance-type" requirement with the specific types that
+// can satisfy the pod's resource requests. The returned list is sorted by CPU
+// (ascending) so the cheapest valid type is first.
+func filterInstanceTypesByRequirements(instanceTypes []*cloudprovider.InstanceType, nodeClaim *karpv1.NodeClaim) []*cloudprovider.InstanceType {
+	// Extract allowed instance types from NodeClaim requirements
+	var allowedTypes map[string]bool
+	for _, req := range nodeClaim.Spec.Requirements {
+		if req.Key == v1.LabelInstanceTypeStable && req.Operator == v1.NodeSelectorOpIn {
+			allowedTypes = make(map[string]bool, len(req.Values))
+			for _, val := range req.Values {
+				allowedTypes[val] = true
+			}
+			break
+		}
+	}
+
+	// If no instance-type requirement found, return all types
+	if allowedTypes == nil {
+		return instanceTypes
+	}
+
+	// Filter to only allowed types
+	var filtered []*cloudprovider.InstanceType
+	for _, it := range instanceTypes {
+		if allowedTypes[it.Name] {
+			filtered = append(filtered, it)
+		}
+	}
+
+	// Sort by CPU (ascending) to prefer cheaper/smaller instance types
+	sort.Slice(filtered, func(i, j int) bool {
+		cpuI := filtered[i].Capacity.Cpu().MilliValue()
+		cpuJ := filtered[j].Capacity.Cpu().MilliValue()
+		if cpuI != cpuJ {
+			return cpuI < cpuJ
+		}
+		// Tie-break by memory
+		memI := filtered[i].Capacity.Memory().Value()
+		memJ := filtered[j].Capacity.Memory().Value()
+		return memI < memJ
+	})
+
+	return filtered
 }
 
 // parseProviderID extracts the droplet ID from a provider ID string.

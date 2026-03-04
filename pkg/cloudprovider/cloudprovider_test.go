@@ -377,6 +377,137 @@ func TestCloudProviderCreateMissingNodeClass(t *testing.T) {
 	}
 }
 
+func TestCloudProviderCreateWithRequirementsFiltering(t *testing.T) {
+	ctx := context.Background()
+
+	nodeClass := &v1alpha1.DONodeClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-class",
+		},
+		Spec: v1alpha1.DONodeClassSpec{
+			Region: "nyc1",
+		},
+	}
+
+	scheme := newTestScheme()
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(nodeClass).
+		Build()
+
+	instanceProvider := fakeproviders.NewInstanceProvider()
+	instanceTypeProvider := &fakeproviders.InstanceTypeProvider{
+		InstanceTypes: []*cloudprovider.InstanceType{
+			newTestInstanceType("s-1vcpu-2gb", "nyc1"),
+			newTestInstanceType("s-2vcpu-4gb", "nyc1"),
+			newTestInstanceType("s-4vcpu-8gb", "nyc1"),
+		},
+	}
+
+	cp := New(kubeClient, instanceProvider, instanceTypeProvider)
+
+	// Create a NodeClaim with requirements that only allow s-4vcpu-8gb
+	nodeClaim := &karpv1.NodeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-claim-filtered",
+		},
+		Spec: karpv1.NodeClaimSpec{
+			NodeClassRef: &karpv1.NodeClassReference{
+				Name:  "test-class",
+				Group: v1alpha1.Group,
+				Kind:  v1alpha1.DONodeClassKind,
+			},
+			Requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelInstanceTypeStable,
+						Operator: v1.NodeSelectorOpIn,
+						Values:   []string{"s-4vcpu-8gb"},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := cp.Create(ctx, nodeClaim)
+	if err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	// Verify the instance was created (the fake instance provider picks instanceTypes[0])
+	// and since we filtered to only s-4vcpu-8gb, it should get that type
+	if result.Status.ProviderID == "" {
+		t.Error("expected non-empty provider ID")
+	}
+	if instanceProvider.CreateCalls != 1 {
+		t.Errorf("expected 1 create call, got %d", instanceProvider.CreateCalls)
+	}
+
+	// Verify the last instance types passed to Create had only the filtered type
+	if len(instanceProvider.LastInstanceTypes) != 1 {
+		t.Fatalf("expected 1 filtered instance type passed to provider, got %d", len(instanceProvider.LastInstanceTypes))
+	}
+	if instanceProvider.LastInstanceTypes[0].Name != "s-4vcpu-8gb" {
+		t.Errorf("expected filtered type %q, got %q", "s-4vcpu-8gb", instanceProvider.LastInstanceTypes[0].Name)
+	}
+}
+
+func TestCloudProviderCreateNoMatchingRequirements(t *testing.T) {
+	ctx := context.Background()
+
+	nodeClass := &v1alpha1.DONodeClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-class",
+		},
+		Spec: v1alpha1.DONodeClassSpec{
+			Region: "nyc1",
+		},
+	}
+
+	scheme := newTestScheme()
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(nodeClass).
+		Build()
+
+	instanceProvider := fakeproviders.NewInstanceProvider()
+	instanceTypeProvider := &fakeproviders.InstanceTypeProvider{
+		InstanceTypes: []*cloudprovider.InstanceType{
+			newTestInstanceType("s-1vcpu-2gb", "nyc1"),
+		},
+	}
+
+	cp := New(kubeClient, instanceProvider, instanceTypeProvider)
+
+	// Create a NodeClaim with requirements that don't match any available types
+	nodeClaim := &karpv1.NodeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-claim-nomatch",
+		},
+		Spec: karpv1.NodeClaimSpec{
+			NodeClassRef: &karpv1.NodeClassReference{
+				Name:  "test-class",
+				Group: v1alpha1.Group,
+				Kind:  v1alpha1.DONodeClassKind,
+			},
+			Requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelInstanceTypeStable,
+						Operator: v1.NodeSelectorOpIn,
+						Values:   []string{"g-32vcpu-128gb"},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := cp.Create(ctx, nodeClaim)
+	if err == nil {
+		t.Fatal("expected error when no instance types match requirements")
+	}
+}
+
 func TestCloudProviderCreateInstanceProviderError(t *testing.T) {
 	ctx := context.Background()
 
@@ -930,6 +1061,162 @@ func TestCloudProviderCreateGetDeleteRoundtrip(t *testing.T) {
 	}
 	if len(listed) != 0 {
 		t.Errorf("expected 0 listed after delete, got %d", len(listed))
+	}
+}
+
+// --- filterInstanceTypesByRequirements Tests ---
+
+func TestFilterInstanceTypesByRequirements(t *testing.T) {
+	small := newTestInstanceType("s-1vcpu-2gb", "nyc1")
+	medium := newTestInstanceType("s-2vcpu-4gb", "nyc1")
+	large := newTestInstanceType("s-4vcpu-8gb", "nyc1")
+	allTypes := []*cloudprovider.InstanceType{small, medium, large}
+
+	tests := []struct {
+		name          string
+		requirements  []karpv1.NodeSelectorRequirementWithMinValues
+		expectedNames []string
+	}{
+		{
+			name:          "no requirements - returns all types",
+			requirements:  nil,
+			expectedNames: []string{"s-1vcpu-2gb", "s-2vcpu-4gb", "s-4vcpu-8gb"},
+		},
+		{
+			name: "filter to specific types",
+			requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelInstanceTypeStable,
+						Operator: v1.NodeSelectorOpIn,
+						Values:   []string{"s-2vcpu-4gb", "s-4vcpu-8gb"},
+					},
+				},
+			},
+			expectedNames: []string{"s-2vcpu-4gb", "s-4vcpu-8gb"},
+		},
+		{
+			name: "filter to single type",
+			requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelInstanceTypeStable,
+						Operator: v1.NodeSelectorOpIn,
+						Values:   []string{"s-4vcpu-8gb"},
+					},
+				},
+			},
+			expectedNames: []string{"s-4vcpu-8gb"},
+		},
+		{
+			name: "filter to non-existent type returns empty",
+			requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelInstanceTypeStable,
+						Operator: v1.NodeSelectorOpIn,
+						Values:   []string{"g-32vcpu-128gb"},
+					},
+				},
+			},
+			expectedNames: nil,
+		},
+		{
+			name: "non-instance-type requirement is ignored",
+			requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelTopologyRegion,
+						Operator: v1.NodeSelectorOpIn,
+						Values:   []string{"nyc1"},
+					},
+				},
+			},
+			expectedNames: []string{"s-1vcpu-2gb", "s-2vcpu-4gb", "s-4vcpu-8gb"},
+		},
+		{
+			name: "NotIn operator is ignored (only In is used)",
+			requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelInstanceTypeStable,
+						Operator: v1.NodeSelectorOpNotIn,
+						Values:   []string{"s-1vcpu-2gb"},
+					},
+				},
+			},
+			expectedNames: []string{"s-1vcpu-2gb", "s-2vcpu-4gb", "s-4vcpu-8gb"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nc := &karpv1.NodeClaim{
+				Spec: karpv1.NodeClaimSpec{
+					Requirements: tt.requirements,
+				},
+			}
+
+			result := filterInstanceTypesByRequirements(allTypes, nc)
+
+			if len(result) != len(tt.expectedNames) {
+				t.Fatalf("expected %d types, got %d", len(tt.expectedNames), len(result))
+			}
+			for i, name := range tt.expectedNames {
+				if result[i].Name != name {
+					t.Errorf("result[%d].Name = %q, want %q", i, result[i].Name, name)
+				}
+			}
+		})
+	}
+}
+
+func TestFilterInstanceTypesByRequirementsSorting(t *testing.T) {
+	// Provide types in reverse order to verify sorting
+	large := newTestInstanceType("s-4vcpu-8gb", "nyc1")
+	large.Capacity = v1.ResourceList{
+		v1.ResourceCPU:    resource.MustParse("4"),
+		v1.ResourceMemory: resource.MustParse("8Gi"),
+	}
+	medium := newTestInstanceType("s-2vcpu-4gb", "nyc1")
+	medium.Capacity = v1.ResourceList{
+		v1.ResourceCPU:    resource.MustParse("2"),
+		v1.ResourceMemory: resource.MustParse("4Gi"),
+	}
+	small := newTestInstanceType("s-1vcpu-2gb", "nyc1")
+	small.Capacity = v1.ResourceList{
+		v1.ResourceCPU:    resource.MustParse("1"),
+		v1.ResourceMemory: resource.MustParse("2Gi"),
+	}
+
+	// Input in reverse order
+	allTypes := []*cloudprovider.InstanceType{large, medium, small}
+
+	nc := &karpv1.NodeClaim{
+		Spec: karpv1.NodeClaimSpec{
+			Requirements: []karpv1.NodeSelectorRequirementWithMinValues{
+				{
+					NodeSelectorRequirement: v1.NodeSelectorRequirement{
+						Key:      v1.LabelInstanceTypeStable,
+						Operator: v1.NodeSelectorOpIn,
+						Values:   []string{"s-1vcpu-2gb", "s-2vcpu-4gb", "s-4vcpu-8gb"},
+					},
+				},
+			},
+		},
+	}
+
+	result := filterInstanceTypesByRequirements(allTypes, nc)
+
+	// Should be sorted ascending by CPU
+	expectedOrder := []string{"s-1vcpu-2gb", "s-2vcpu-4gb", "s-4vcpu-8gb"}
+	if len(result) != 3 {
+		t.Fatalf("expected 3 types, got %d", len(result))
+	}
+	for i, name := range expectedOrder {
+		if result[i].Name != name {
+			t.Errorf("result[%d].Name = %q, want %q (should be sorted by CPU ascending)", i, result[i].Name, name)
+		}
 	}
 }
 

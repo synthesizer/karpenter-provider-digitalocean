@@ -57,6 +57,9 @@ type InstanceProvider struct {
 	DeleteCalls int
 	GetCalls    int
 	ListCalls   int
+
+	// LastInstanceTypes records the instance types passed to the most recent Create call.
+	LastInstanceTypes []*cloudprovider.InstanceType
 }
 
 // NewInstanceProvider creates a new fake instance provider for DOKS node pools.
@@ -72,6 +75,7 @@ func (p *InstanceProvider) Create(_ context.Context, nodeClass *v1alpha1.DONodeC
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.CreateCalls++
+	p.LastInstanceTypes = instanceTypes
 
 	if p.CreateError != nil {
 		return nil, p.CreateError
